@@ -6,82 +6,356 @@
     <title>SDR FM Radio</title>
     <style>
       :root {
-        --bg1: #07203a;
-        --bg2: #0b3f47;
-        --panel: rgba(255, 255, 255, 0.12);
-        --text: #f2fbff;
-        --accent: #ffd166;
+        --bg1: #f4f6fb;
+        --bg2: #dbe4f1;
+        --glass: rgba(255, 255, 255, 0.58);
+        --glass-strong: rgba(255, 255, 255, 0.76);
+        --text: #111827;
+        --muted: #6b7280;
+        --accent: #0a84ff;
+        --danger: #ff453a;
+        --ring: rgba(10, 132, 255, 0.25);
       }
       body {
         margin: 0;
         min-height: 100vh;
-        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        font-family: "SF Pro Display", "Avenir Next", "Segoe UI", sans-serif;
         color: var(--text);
-        background: radial-gradient(circle at top right, #1e8f8f, transparent 38%),
-          linear-gradient(130deg, var(--bg1), var(--bg2));
+        background:
+          radial-gradient(circle at 10% 14%, rgba(10, 132, 255, 0.16), transparent 35%),
+          radial-gradient(circle at 88% 18%, rgba(255, 255, 255, 0.6), transparent 40%),
+          linear-gradient(155deg, var(--bg1), var(--bg2));
         display: grid;
         place-items: center;
       }
       .card {
-        width: min(620px, 94vw);
-        background: var(--panel);
-        border: 1px solid rgba(255, 255, 255, 0.3);
-        border-radius: 20px;
+        width: min(860px, 95vw);
+        background: var(--glass);
+        border: 1px solid rgba(255, 255, 255, 0.7);
+        border-radius: 28px;
+        padding: 24px;
+        backdrop-filter: blur(20px) saturate(150%);
+        box-shadow: 0 26px 60px rgba(31, 41, 55, 0.16);
+      }
+      .top {
+        display: grid;
+        grid-template-columns: 1.2fr 1fr;
+        gap: 18px;
+        align-items: stretch;
+      }
+      .now {
+        border-radius: 22px;
         padding: 22px;
-        backdrop-filter: blur(6px);
+        background: var(--glass-strong);
+        border: 1px solid rgba(255, 255, 255, 0.85);
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
       }
-      h1 { margin: 0 0 14px; font-size: 1.7rem; }
-      .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-      label { display: block; font-size: 0.9rem; margin-bottom: 6px; }
+      h1 { margin: 0; font-size: 1.3rem; letter-spacing: 0.01em; font-weight: 600; }
+      .sub { color: var(--muted); margin: 6px 0 12px; font-size: 0.92rem; }
+      .dial {
+        margin-top: 8px;
+        font-size: clamp(2.1rem, 4vw, 3rem);
+        letter-spacing: 0.02em;
+        font-weight: 700;
+      }
+      .controls {
+        border-radius: 22px;
+        padding: 18px;
+        background: var(--glass-strong);
+        border: 1px solid rgba(255, 255, 255, 0.85);
+      }
+      .row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+      label { display: block; font-size: 0.78rem; margin-bottom: 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
       input, select, button {
-        width: 100%; border: 0; border-radius: 10px; padding: 10px; font-size: 1rem;
+        width: 100%; border: 1px solid rgba(209, 213, 219, 0.8); border-radius: 12px; padding: 11px 12px; font-size: 1rem;
+        box-sizing: border-box;
       }
-      button { cursor: pointer; font-weight: 700; }
-      #startBtn { background: var(--accent); color: #2b1c00; }
-      #stopBtn { background: #f25f5c; color: white; }
-      .status { margin-top: 14px; font-size: 0.95rem; }
+      input, select { background: rgba(255,255,255,0.85); color: var(--text); }
+      input:focus, select:focus {
+        outline: none;
+        border-color: var(--accent);
+        box-shadow: 0 0 0 4px var(--ring);
+      }
+      button { cursor: pointer; font-weight: 600; }
+      #toggleBtn { background: var(--accent); color: white; border-color: transparent; }
+      #toggleBtn.stop { background: var(--danger); }
+      .status { margin-top: 16px; font-size: 0.92rem; color: #0a84ff; font-weight: 500; }
+      .metrics {
+        margin-top: 14px;
+        padding: 12px;
+        border-radius: 16px;
+        background: rgba(255,255,255,0.8);
+        border: 1px solid rgba(229, 231, 235, 0.9);
+        color: #334155;
+      }
       .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .audio-tools {
+        margin-top: 12px;
+        padding: 12px;
+        border-radius: 16px;
+        background: rgba(255,255,255,0.8);
+        border: 1px solid rgba(229, 231, 235, 0.9);
+      }
+      .vol-row {
+        display: grid;
+        grid-template-columns: auto 1fr auto;
+        align-items: center;
+        gap: 10px;
+      }
+      .vol-row label,
+      .gain-row label {
+        margin: 0;
+        font-size: 0.78rem;
+      }
+      .gain-grid {
+        margin-top: 12px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+      .gain-row {
+        display: grid;
+        grid-template-columns: auto 1fr auto;
+        align-items: center;
+        gap: 8px;
+      }
+      #volumeValue,
+      .gain-value {
+        font-size: 0.86rem;
+        color: var(--muted);
+        min-width: 40px;
+        text-align: right;
+      }
+      #miniSpec {
+        margin-top: 10px;
+        width: 100%;
+        height: 72px;
+        border-radius: 10px;
+        display: block;
+        background: #0b1220;
+        border: 1px solid rgba(209, 213, 219, 0.45);
+      }
+      .history {
+        padding: 12px;
+        border-radius: 16px;
+        background: rgba(255,255,255,0.8);
+        border: 1px solid rgba(229, 231, 235, 0.9);
+      }
+      .history h3 {
+        margin: 0 0 8px;
+        font-size: 0.82rem;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+        text-transform: uppercase;
+      }
+      #historyList {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        display: grid;
+        gap: 6px;
+      }
+      #historyList li {
+        padding: 8px 10px;
+        border-radius: 10px;
+        border: 1px solid rgba(209, 213, 219, 0.85);
+        font-size: 0.95rem;
+        cursor: pointer;
+        user-select: none;
+        background: rgba(255,255,255,0.75);
+      }
+      #historyList li:hover {
+        border-color: var(--accent);
+      }
+      .bottom-grid {
+        margin-top: 12px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+      .rds-card {
+        padding: 12px;
+        border-radius: 16px;
+        background: rgba(255,255,255,0.8);
+        border: 1px solid rgba(229, 231, 235, 0.9);
+      }
+      .rds-card h3 {
+        margin: 0 0 8px;
+        font-size: 0.82rem;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+        text-transform: uppercase;
+      }
+      #rds {
+        margin: 0;
+        padding: 10px;
+        border-radius: 10px;
+        border: 1px solid rgba(209, 213, 219, 0.85);
+        background: rgba(255,255,255,0.75);
+        font-size: 0.92rem;
+      }
+      @media (max-width: 860px) {
+        .top { grid-template-columns: 1fr; }
+        .bottom-grid { grid-template-columns: 1fr; }
+      }
+      @media (max-width: 700px) {
+        .row { grid-template-columns: 1fr; }
+      }
     </style>
   </head>
   <body>
     <div class="card">
-      <h1>Simple FM Receiver</h1>
-      <div class="row">
-        <div>
-          <label for="device">SDR Device</label>
-          <select id="device"></select>
+      <div class="top">
+        <div class="now">
+          <h1>Now Playing</h1>
+          <div class="sub">Live FM stream via SDR gateway</div>
+          <div class="dial"><span id="dialFreq">92.1</span> MHz</div>
         </div>
-        <div>
-          <label for="freq">Frequency (MHz)</label>
-          <input id="freq" type="number" min="76" max="108" step="0.1" value="92.1" />
+        <div class="controls">
+          <div class="row">
+            <div>
+              <label for="device">SDR Device</label>
+              <select id="device"></select>
+            </div>
+            <div>
+              <label for="freq">Frequency (MHz)</label>
+              <input id="freq" type="number" min="76" max="108" step="0.1" value="92.1" />
+            </div>
+          </div>
+          <div class="row" style="margin-top: 10px;">
+            <button id="toggleBtn">Start Listening</button>
+          </div>
+          <div class="gain-grid">
+            <div class="gain-row">
+              <label for="lnaGain">LNA</label>
+              <input id="lnaGain" type="range" min="0" max="40" step="8" value="32" />
+              <span class="gain-value" id="lnaGainValue">32 dB</span>
+            </div>
+            <div class="gain-row">
+              <label for="vgaGain">VGA</label>
+              <input id="vgaGain" type="range" min="0" max="62" step="2" value="40" />
+              <span class="gain-value" id="vgaGainValue">40 dB</span>
+            </div>
+          </div>
         </div>
-      </div>
-      <div class="row" style="margin-top: 10px;">
-        <button id="startBtn">Start</button>
-        <button id="stopBtn">Stop</button>
       </div>
       <div class="status" id="status">Idle.</div>
-      <div class="status mono" id="queue"></div>
+      <div class="audio-tools">
+        <div class="vol-row">
+          <label for="volume">Volume</label>
+          <input id="volume" type="range" min="0" max="1.2" step="0.01" value="0.85" />
+          <span id="volumeValue">85%</span>
+        </div>
+        <canvas id="miniSpec" width="800" height="72"></canvas>
+      </div>
+      <div class="bottom-grid">
+        <div class="rds-card">
+          <h3>RDS</h3>
+          <div id="rds">RDS: waiting...</div>
+        </div>
+        <div class="history">
+          <h3>Recent Channels (Double-click to tune)</h3>
+          <ul id="historyList"></ul>
+        </div>
+      </div>
     </div>
 
     <script>
       const statusEl = document.getElementById("status");
-      const queueEl = document.getElementById("queue");
+      const rdsEl = document.getElementById("rds");
       const deviceEl = document.getElementById("device");
       const freqEl = document.getElementById("freq");
-      const startBtn = document.getElementById("startBtn");
-      const stopBtn = document.getElementById("stopBtn");
+      const dialFreqEl = document.getElementById("dialFreq");
+      const toggleBtn = document.getElementById("toggleBtn");
+      const historyListEl = document.getElementById("historyList");
+      const volumeEl = document.getElementById("volume");
+      const volumeValueEl = document.getElementById("volumeValue");
+      const lnaGainEl = document.getElementById("lnaGain");
+      const vgaGainEl = document.getElementById("vgaGain");
+      const lnaGainValueEl = document.getElementById("lnaGainValue");
+      const vgaGainValueEl = document.getElementById("vgaGainValue");
+      const specCanvas = document.getElementById("miniSpec");
+      const specCtx = specCanvas.getContext("2d");
 
       let running = false;
       let audioCtx = null;
+      let gainNode = null;
       let playCursor = 0;
       let bufferedStarts = 0;
+      let audioLoopActive = false;
+      let resumePending = false;
+      const HISTORY_KEY = "fm_channel_history_v1";
+      const MAX_HISTORY = 10;
+      let channelHistory = [];
+      const specBars = new Array(64).fill(0);
 
       function setStatus(msg) { statusEl.textContent = msg; }
+      function syncDial() {
+        const freq = Number(freqEl.value);
+        dialFreqEl.textContent = Number.isFinite(freq) && freq > 0 ? freq.toFixed(1) : "--.-";
+      }
+      function isEditingFrequency() {
+        return document.activeElement === freqEl;
+      }
+      function isEditingGain() {
+        return document.activeElement === lnaGainEl || document.activeElement === vgaGainEl;
+      }
+      function setToggleUi() {
+        if (running) {
+          toggleBtn.textContent = "Stop";
+          toggleBtn.classList.add("stop");
+        } else {
+          toggleBtn.textContent = "Start Listening";
+          toggleBtn.classList.remove("stop");
+        }
+      }
+
+      function loadHistory() {
+        try {
+          const raw = localStorage.getItem(HISTORY_KEY);
+          channelHistory = raw ? JSON.parse(raw) : [];
+          if (!Array.isArray(channelHistory)) channelHistory = [];
+        } catch (_) {
+          channelHistory = [];
+        }
+        renderHistory();
+      }
+
+      function saveHistory() {
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(channelHistory.slice(0, MAX_HISTORY)));
+      }
+
+      function addHistory(freq) {
+        const val = Number(freq).toFixed(1);
+        channelHistory = [val, ...channelHistory.filter((x) => x !== val)].slice(0, MAX_HISTORY);
+        saveHistory();
+        renderHistory();
+      }
+
+      function renderHistory() {
+        historyListEl.innerHTML = "";
+        for (const ch of channelHistory) {
+          const li = document.createElement("li");
+          li.textContent = `${ch} MHz`;
+          li.ondblclick = async () => {
+            freqEl.value = ch;
+            syncDial();
+            await tuneNow();
+          };
+          historyListEl.appendChild(li);
+        }
+      }
 
       async function loadDevices() {
         const resp = await fetch("/api/devices");
         const devices = await resp.json();
+        if (!resp.ok) {
+          deviceEl.innerHTML = "";
+          setStatus(devices.error || "Could not reach sdr-gateway.");
+          return;
+        }
         deviceEl.innerHTML = "";
         for (const d of devices) {
           const opt = document.createElement("option");
@@ -94,9 +368,62 @@
 
       function ensureAudio() {
         if (!audioCtx) audioCtx = new AudioContext({ sampleRate: 48000 });
+        if (!gainNode) {
+          gainNode = audioCtx.createGain();
+          gainNode.gain.value = Number(volumeEl.value);
+          gainNode.connect(audioCtx.destination);
+        }
         if (audioCtx.state === "suspended") return audioCtx.resume();
         if (playCursor < audioCtx.currentTime + 0.25) playCursor = audioCtx.currentTime + 0.25;
         return Promise.resolve();
+      }
+      function setVolumeUi() {
+        const pct = Math.round(Number(volumeEl.value) * 100);
+        volumeValueEl.textContent = `${pct}%`;
+      }
+      function setGainUi() {
+        lnaGainValueEl.textContent = `${Number(lnaGainEl.value)} dB`;
+        vgaGainValueEl.textContent = `${Number(vgaGainEl.value)} dB`;
+      }
+      function syncGainFromStatus(s) {
+        if (isEditingGain()) return;
+        if (s.lna_gain_db !== undefined) lnaGainEl.value = Number(s.lna_gain_db);
+        if (s.vga_gain_db !== undefined) vgaGainEl.value = Number(s.vga_gain_db);
+        setGainUi();
+      }
+      async function applyGainIfRunning() {
+        setGainUi();
+        if (!running) return;
+        setStatus(`Applying gain: LNA ${lnaGainEl.value} dB | VGA ${vgaGainEl.value} dB`);
+        await tuneNow();
+      }
+      async function fetchJsonWithTimeout(url, opts = {}, timeoutMs = 1800) {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), timeoutMs);
+        try {
+          const resp = await fetch(url, { ...opts, signal: ctrl.signal, cache: "no-store" });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          return await resp.json();
+        } finally {
+          clearTimeout(t);
+        }
+      }
+      function drawMiniSpec() {
+        const w = specCanvas.width;
+        const h = specCanvas.height;
+        specCtx.fillStyle = "#0b1220";
+        specCtx.fillRect(0, 0, w, h);
+        const bw = w / specBars.length;
+        for (let i = 0; i < specBars.length; i++) {
+          const v = Math.max(0, Math.min(1, specBars[i]));
+          const bh = Math.max(2, v * (h - 6));
+          const x = i * bw;
+          const y = h - bh - 3;
+          specCtx.fillStyle = `rgba(${40 + Math.floor(v * 120)}, ${120 + Math.floor(v * 100)}, 255, 0.95)`;
+          specCtx.fillRect(x + 1, y, Math.max(1, bw - 2), bh);
+          specBars[i] *= 0.92;
+        }
+        requestAnimationFrame(drawMiniSpec);
       }
 
       function schedulePcm16(arrayBuffer) {
@@ -105,11 +432,29 @@
         const f32 = new Float32Array(pcm.length);
         for (let i = 0; i < pcm.length; i++) f32[i] = pcm[i] / 32768.0;
 
+        // Update mini spectrograph from a simple DFT over a short audio window.
+        const n = 256;
+        if (f32.length >= n) {
+          const bins = specBars.length;
+          for (let b = 0; b < bins; b++) {
+            const k = b + 1;
+            let re = 0;
+            let im = 0;
+            for (let t = 0; t < n; t++) {
+              const ang = (2 * Math.PI * k * t) / n;
+              re += f32[t] * Math.cos(ang);
+              im -= f32[t] * Math.sin(ang);
+            }
+            const mag = Math.sqrt(re * re + im * im) / n;
+            specBars[b] = Math.max(specBars[b], Math.min(1, mag * 8));
+          }
+        }
+
         const buf = audioCtx.createBuffer(1, f32.length, 48000);
         buf.copyToChannel(f32, 0, 0);
         const src = audioCtx.createBufferSource();
         src.buffer = buf;
-        src.connect(audioCtx.destination);
+        src.connect(gainNode);
 
         const startAt = Math.max(playCursor, audioCtx.currentTime + 0.02);
         src.start(startAt);
@@ -117,10 +462,24 @@
       }
 
       async function audioLoop() {
+        if (audioLoopActive) return;
+        audioLoopActive = true;
         while (running) {
           try {
+            if (!audioCtx || !gainNode) {
+              try {
+                await ensureAudio();
+              } catch (_) {
+                resumePending = true;
+                await new Promise((r) => setTimeout(r, 120));
+                continue;
+              }
+            }
             const resp = await fetch("/api/audio/batch?count=6&timeout=0.4", { cache: "no-store" });
-            if (resp.status === 204) continue;
+            if (resp.status === 204) {
+              await new Promise((r) => setTimeout(r, 120));
+              continue;
+            }
             if (!resp.ok) throw new Error(`audio fetch failed (${resp.status})`);
             schedulePcm16(await resp.arrayBuffer());
             bufferedStarts += 1;
@@ -135,26 +494,93 @@
             await new Promise((r) => setTimeout(r, 80));
           }
         }
+        audioLoopActive = false;
       }
 
       async function statusLoop() {
         while (true) {
           try {
-            const resp = await fetch("/api/radio/status", { cache: "no-store" });
-            const s = await resp.json();
-            queueEl.textContent = `running=${s.running} worker=${s.worker_alive} stream=${s.stream_id || "-"} queue=${s.queued_chunks} produced=${s.produced_chunks} served=${s.served_chunks} rms=${Number(s.last_audio_rms || 0).toFixed(4)} err=${s.worker_error || "-"}`;
+            const s = await fetchJsonWithTimeout("/api/radio/status", {}, 1500);
+            running = !!s.running;
+            setToggleUi();
+            if (running) {
+              syncGainFromStatus(s);
+              if (!isEditingFrequency()) {
+                freqEl.value = Number(s.freq_mhz || freqEl.value).toFixed(1);
+                syncDial();
+              }
+              try {
+                await ensureAudio();
+                resumePending = false;
+                audioLoop();
+              } catch (_) {
+                resumePending = true;
+              }
+            } else {
+              resumePending = false;
+            }
+            if (s.running) {
+              setStatus(`Streaming FM at ${Number(s.freq_mhz).toFixed(1)} MHz | LNA ${s.lna_gain_db} dB | VGA ${s.vga_gain_db} dB`);
+            } else {
+              setStatus("Stopped.");
+            }
+            const avail = s.rds_available ? "yes" : "no";
+            const en = s.rds_enabled ? "on" : "off";
+            const ps = s.rds_ps || "-";
+            const pi = s.rds_pi || "-";
+            const rt = s.rds_rt || "-";
+            rdsEl.textContent = `RDS available=${avail} enabled=${en} PS=${ps} PI=${pi} RT=${rt}`;
           } catch (_) {}
           await new Promise((r) => setTimeout(r, 1000));
         }
       }
 
-      startBtn.onclick = async () => {
+      async function syncStatusOnce() {
         try {
-          await ensureAudio();
+          await fetchJsonWithTimeout("/api/radio/attach-existing", { method: "POST" }, 1800).catch(() => ({}));
+          const s = await fetchJsonWithTimeout("/api/radio/status", {}, 1500);
+          running = !!s.running;
+          setToggleUi();
+          if (running) {
+            syncGainFromStatus(s);
+            freqEl.value = Number(s.freq_mhz || freqEl.value).toFixed(1);
+            syncDial();
+            if (s.device_id) {
+              deviceEl.value = s.device_id;
+            }
+            setStatus(`Streaming FM at ${Number(s.freq_mhz).toFixed(1)} MHz | LNA ${s.lna_gain_db} dB | VGA ${s.vga_gain_db} dB`);
+            setToggleUi();
+            try {
+              await ensureAudio();
+              resumePending = false;
+              audioLoop();
+            } catch (_) {
+              resumePending = true;
+            }
+          } else {
+            setStatus("Idle.");
+          }
+        } catch (_) {
+          setStatus("Idle. Press Start Listening.");
+          running = false;
+          setToggleUi();
+        }
+      }
+
+      async function tuneNow() {
+        try {
+          syncDial();
+          const freq = Number(freqEl.value);
+          if (!Number.isFinite(freq) || freq < 76 || freq > 108) {
+            setStatus("Enter a valid FM frequency.");
+            return;
+          }
           const payload = {
             device_id: deviceEl.value,
-            freq_mhz: Number(freqEl.value),
+            freq_mhz: freq,
             sample_rate_sps: 2000000,
+            lna_gain_db: Number(lnaGainEl.value),
+            vga_gain_db: Number(vgaGainEl.value),
           };
           const resp = await fetch("/api/radio/start", {
             method: "POST",
@@ -163,23 +589,84 @@
           });
           const data = await resp.json();
           if (!resp.ok) throw new Error(data.detail || data.error || "start failed");
+          const wasRunning = running;
           running = true;
+          try {
+            await ensureAudio();
+            resumePending = false;
+          } catch (_) {
+            resumePending = true;
+          }
+          if (!wasRunning) audioLoop();
           bufferedStarts = 0;
-          setStatus(`Streaming FM at ${payload.freq_mhz.toFixed(1)} MHz (${data.sample_rate_sps} sps)`);
-          audioLoop();
+          addHistory(payload.freq_mhz);
+          if (data.lna_gain_db !== undefined) lnaGainEl.value = Number(data.lna_gain_db);
+          if (data.vga_gain_db !== undefined) vgaGainEl.value = Number(data.vga_gain_db);
+          setGainUi();
+          setStatus(`Streaming FM at ${payload.freq_mhz.toFixed(1)} MHz | LNA ${lnaGainEl.value} dB | VGA ${vgaGainEl.value} dB`);
+          setToggleUi();
         } catch (err) {
           setStatus(`Start failed: ${err.message}`);
         }
-      };
+      }
 
-      stopBtn.onclick = async () => {
+      async function stopNow() {
         running = false;
         await fetch("/api/radio/stop", { method: "POST" });
         setStatus("Stopped.");
+        setToggleUi();
+      }
+
+      toggleBtn.onclick = async () => {
+        if (running) await stopNow();
+        else await tuneNow();
       };
 
-      loadDevices();
-      statusLoop();
+      window.addEventListener("pointerdown", async () => {
+        if (!resumePending || !running) return;
+        try {
+          await ensureAudio();
+          resumePending = false;
+          audioLoop();
+          setStatus(`Streaming FM at ${Number(freqEl.value).toFixed(1)} MHz`);
+        } catch (_) {}
+      }, { passive: true });
+
+      freqEl.addEventListener("keydown", async (ev) => {
+        if (ev.key === "Enter") {
+          ev.preventDefault();
+          await tuneNow();
+        }
+      });
+
+      freqEl.addEventListener("input", syncDial);
+      volumeEl.addEventListener("input", () => {
+        setVolumeUi();
+        if (gainNode) gainNode.gain.value = Number(volumeEl.value);
+      });
+      lnaGainEl.addEventListener("input", setGainUi);
+      vgaGainEl.addEventListener("input", setGainUi);
+      lnaGainEl.addEventListener("change", applyGainIfRunning);
+      vgaGainEl.addEventListener("change", applyGainIfRunning);
+      syncDial();
+      setVolumeUi();
+      setGainUi();
+      drawMiniSpec();
+      async function initPage() {
+        loadHistory();
+        setToggleUi();
+        setStatus("Loading devices...");
+        try {
+          await loadDevices();
+        } catch (_) {
+          setStatus("Could not load SDR devices.");
+        }
+        setStatus("Checking existing stream...");
+        await syncStatusOnce();
+        statusLoop();
+      }
+
+      initPage();
     </script>
   </body>
 </html>
