@@ -82,6 +82,16 @@
       #toggleBtn { background: var(--accent); color: white; border-color: transparent; }
       #toggleBtn.stop { background: var(--danger); }
       .status { margin-top: 16px; font-size: 0.92rem; color: #0a84ff; font-weight: 500; }
+      .status button {
+        width: auto;
+        margin-left: 8px;
+        padding: 5px 9px;
+        border-radius: 8px;
+        border: 0;
+        background: var(--accent);
+        color: white;
+        font-size: 0.82rem;
+      }
       .metrics {
         margin-top: 14px;
         padding: 12px;
@@ -112,8 +122,7 @@
       .gain-grid {
         margin-top: 12px;
         display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 10px;
+        gap: 6px;
       }
       .gain-row {
         display: grid;
@@ -218,6 +227,26 @@
         background: rgba(255,255,255,0.75);
         font-size: 0.92rem;
       }
+      .rds-main {
+        font-weight: 650;
+        color: var(--text);
+      }
+      .rds-sub {
+        margin-top: 4px;
+        color: var(--muted);
+      }
+      .rds-meta {
+        margin-top: 6px;
+        font-size: 0.82rem;
+        color: var(--muted);
+      }
+      .rds-debug {
+        margin-top: 6px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.76rem;
+        color: var(--muted);
+        overflow-wrap: anywhere;
+      }
       @media (max-width: 860px) {
         .top { grid-template-columns: 1fr; }
         .bottom-grid { grid-template-columns: 1fr; }
@@ -251,15 +280,11 @@
           </div>
           <div class="gain-grid">
             <div class="gain-row">
-              <label for="lnaGain">LNA</label>
-              <input id="lnaGain" type="range" min="0" max="40" step="8" value="32" />
-              <span class="gain-value" id="lnaGainValue">32 dB</span>
+              <label for="rxGain">Gain</label>
+              <input id="rxGain" type="range" min="0" max="102" step="2" value="72" />
+              <span class="gain-value" id="rxGainValue">72 dB</span>
             </div>
-            <div class="gain-row">
-              <label for="vgaGain">VGA</label>
-              <input id="vgaGain" type="range" min="0" max="62" step="2" value="40" />
-              <span class="gain-value" id="vgaGainValue">40 dB</span>
-            </div>
+            <div class="gain-value" id="rxGainDetail">LNA 32 dB | VGA 40 dB</div>
           </div>
         </div>
       </div>
@@ -298,10 +323,9 @@
       const historyListEl = document.getElementById("historyList");
       const volumeEl = document.getElementById("volume");
       const volumeValueEl = document.getElementById("volumeValue");
-      const lnaGainEl = document.getElementById("lnaGain");
-      const vgaGainEl = document.getElementById("vgaGain");
-      const lnaGainValueEl = document.getElementById("lnaGainValue");
-      const vgaGainValueEl = document.getElementById("vgaGainValue");
+      const rxGainEl = document.getElementById("rxGain");
+      const rxGainValueEl = document.getElementById("rxGainValue");
+      const rxGainDetailEl = document.getElementById("rxGainDetail");
       const spectrumModeBtn = document.getElementById("spectrumModeBtn");
       const waveModeBtn = document.getElementById("waveModeBtn");
       const specCanvas = document.getElementById("miniSpec");
@@ -315,6 +339,8 @@
       let audioLoopActive = false;
       let resumePending = false;
       const HISTORY_KEY = "fm_channel_history_v1";
+      const RESUME_KEY = "fm_was_playing_v1";
+      const VOLUME_KEY = "fm_volume_v1";
       const MAX_HISTORY = 10;
       let channelHistory = [];
       let chartMode = "spectrum";
@@ -324,6 +350,11 @@
       let waveLevel = 0.08;
 
       function setStatus(msg) { statusEl.textContent = msg; }
+      function setResumeStatus() {
+        statusEl.innerHTML = `Stream is live. <button id="resumeAudioBtn" type="button">Resume Audio</button>`;
+        const btn = document.getElementById("resumeAudioBtn");
+        if (btn) btn.onclick = resumeAudioNow;
+      }
       function syncDial() {
         const freq = Number(freqEl.value);
         dialFreqEl.textContent = Number.isFinite(freq) && freq > 0 ? freq.toFixed(1) : "--.-";
@@ -332,7 +363,7 @@
         return document.activeElement === freqEl;
       }
       function isEditingGain() {
-        return document.activeElement === lnaGainEl || document.activeElement === vgaGainEl;
+        return document.activeElement === rxGainEl;
       }
       function setToggleUi() {
         if (running) {
@@ -409,25 +440,117 @@
         if (playCursor < audioCtx.currentTime + 0.25) playCursor = audioCtx.currentTime + 0.25;
         return Promise.resolve();
       }
+      async function tryEnsureAudio(timeoutMs = 250) {
+        try {
+          await Promise.race([
+            ensureAudio(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error("audio resume timeout")), timeoutMs)),
+          ]);
+          return !(audioCtx && audioCtx.state === "suspended");
+        } catch (_) {
+          return false;
+        }
+      }
+      async function resumeAudioNow() {
+        try {
+          await ensureAudio();
+          if (audioCtx && audioCtx.state === "suspended") {
+            resumePending = true;
+            setResumeStatus();
+            return;
+          }
+          resumePending = false;
+          if (running) audioLoop();
+          setStatus(`Streaming FM at ${Number(freqEl.value).toFixed(1)} MHz`);
+        } catch (_) {
+          resumePending = true;
+          setResumeStatus();
+        }
+      }
       function setVolumeUi() {
         const pct = Math.round(Number(volumeEl.value) * 100);
         volumeValueEl.textContent = `${pct}%`;
       }
+      function loadSavedVolume() {
+        const saved = Number(localStorage.getItem(VOLUME_KEY));
+        if (Number.isFinite(saved)) {
+          volumeEl.value = String(Math.max(0, Math.min(1.2, saved)));
+        }
+        setVolumeUi();
+      }
+      function saveVolume() {
+        localStorage.setItem(VOLUME_KEY, String(Number(volumeEl.value)));
+      }
+      function gainToStages(totalGain) {
+        const total = Math.max(0, Math.min(102, Number(totalGain)));
+        if (total <= 32) {
+          return { lna: Math.round(total / 8) * 8, vga: 0 };
+        }
+        if (total <= 72) {
+          return { lna: 32, vga: Math.round((total - 32) / 2) * 2 };
+        }
+        if (total <= 80) {
+          return { lna: Math.round((32 + total - 72) / 8) * 8, vga: 40 };
+        }
+        return { lna: 40, vga: Math.round((total - 40) / 2) * 2 };
+      }
+      function stagesToGain(lna, vga) {
+        const lnaValue = Number(lna);
+        const vgaValue = Number(vga);
+        if (lnaValue <= 32) return Math.max(0, Math.min(72, lnaValue + vgaValue));
+        return Math.max(72, Math.min(102, 72 + (lnaValue - 32) + Math.max(0, vgaValue - 40)));
+      }
       function setGainUi() {
-        lnaGainValueEl.textContent = `${Number(lnaGainEl.value)} dB`;
-        vgaGainValueEl.textContent = `${Number(vgaGainEl.value)} dB`;
+        const stages = gainToStages(rxGainEl.value);
+        rxGainValueEl.textContent = `${Number(rxGainEl.value)} dB`;
+        rxGainDetailEl.textContent = `LNA ${stages.lna} dB | VGA ${stages.vga} dB`;
       }
       function syncGainFromStatus(s) {
         if (isEditingGain()) return;
-        if (s.lna_gain_db !== undefined) lnaGainEl.value = Number(s.lna_gain_db);
-        if (s.vga_gain_db !== undefined) vgaGainEl.value = Number(s.vga_gain_db);
+        if (s.lna_gain_db !== undefined && s.vga_gain_db !== undefined) {
+          rxGainEl.value = stagesToGain(s.lna_gain_db, s.vga_gain_db);
+        }
         setGainUi();
       }
       async function applyGainIfRunning() {
         setGainUi();
         if (!running) return;
-        setStatus(`Applying gain: LNA ${lnaGainEl.value} dB | VGA ${vgaGainEl.value} dB`);
+        const stages = gainToStages(rxGainEl.value);
+        setStatus(`Applying gain: LNA ${stages.lna} dB | VGA ${stages.vga} dB`);
         await tuneNow();
+      }
+      function escapeHtml(value) {
+        return String(value || "").replace(/[&<>"']/g, (ch) => ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;",
+        })[ch]);
+      }
+      function parseRadioText(text) {
+        const clean = String(text || "").trim();
+        if (!clean) return { title: "Waiting for RDS text", artist: "", raw: "" };
+        const split = clean.split(/\s+-\s+|\s+\u2013\s+|\s+\/\s+/);
+        if (split.length >= 2) {
+          return { artist: split[0].trim(), title: split.slice(1).join(" - ").trim(), raw: clean };
+        }
+        return { title: clean, artist: "", raw: clean };
+      }
+      function renderRds(s) {
+        const station = (s.rds_ps || "").trim();
+        const text = parseRadioText(s.rds_rt || "");
+        const status = s.rds_available ? (s.rds_enabled ? "RDS on" : "RDS idle") : "RDS unavailable";
+        const feedKb = Math.round(Number(s.rds_feed_bytes || 0) / 1024);
+        const lines = Number(s.rds_lines || 0);
+        const jsonLines = Number(s.rds_json_lines || 0);
+        const err = s.rds_error ? ` | ${s.rds_error}` : "";
+        rdsEl.innerHTML = `
+          <div class="rds-main">${escapeHtml(text.title)}</div>
+          ${text.artist ? `<div class="rds-sub">${escapeHtml(text.artist)}</div>` : ""}
+          <div class="rds-meta">${escapeHtml(station || "No station name")} | ${escapeHtml(status)}</div>
+          <div class="rds-debug">feed ${feedKb} KB | lines ${lines} | json ${jsonLines}${escapeHtml(err)}</div>
+        `;
       }
       async function fetchJsonWithTimeout(url, opts = {}, timeoutMs = 1800) {
         const ctrl = new AbortController();
@@ -567,10 +690,9 @@
         while (running) {
           try {
             if (!audioCtx || !gainNode) {
-              try {
-                await ensureAudio();
-              } catch (_) {
+              if (!(await tryEnsureAudio())) {
                 resumePending = true;
+                setResumeStatus();
                 await new Promise((r) => setTimeout(r, 120));
                 continue;
               }
@@ -604,32 +726,28 @@
             running = !!s.running;
             setToggleUi();
             if (running) {
+              localStorage.setItem(RESUME_KEY, "1");
               syncGainFromStatus(s);
               if (!isEditingFrequency()) {
                 freqEl.value = Number(s.freq_mhz || freqEl.value).toFixed(1);
                 syncDial();
               }
-              try {
-                await ensureAudio();
-                resumePending = false;
-                audioLoop();
-              } catch (_) {
-                resumePending = true;
-              }
+              resumePending = !(await tryEnsureAudio());
+              audioLoop();
             } else {
               resumePending = false;
+              localStorage.removeItem(RESUME_KEY);
             }
             if (s.running) {
-              setStatus(`Streaming FM at ${Number(s.freq_mhz).toFixed(1)} MHz | LNA ${s.lna_gain_db} dB | VGA ${s.vga_gain_db} dB`);
+              if (resumePending) {
+                setResumeStatus();
+              } else {
+                setStatus(`Streaming FM at ${Number(s.freq_mhz).toFixed(1)} MHz | LNA ${s.lna_gain_db} dB | VGA ${s.vga_gain_db} dB`);
+              }
             } else {
               setStatus("Stopped.");
             }
-            const avail = s.rds_available ? "yes" : "no";
-            const en = s.rds_enabled ? "on" : "off";
-            const ps = s.rds_ps || "-";
-            const pi = s.rds_pi || "-";
-            const rt = s.rds_rt || "-";
-            rdsEl.textContent = `RDS available=${avail} enabled=${en} PS=${ps} PI=${pi} RT=${rt}`;
+            renderRds(s);
           } catch (_) {}
           await new Promise((r) => setTimeout(r, 1000));
         }
@@ -642,22 +760,23 @@
           running = !!s.running;
           setToggleUi();
           if (running) {
+            localStorage.setItem(RESUME_KEY, "1");
             syncGainFromStatus(s);
             freqEl.value = Number(s.freq_mhz || freqEl.value).toFixed(1);
             syncDial();
             if (s.device_id) {
               deviceEl.value = s.device_id;
             }
-            setStatus(`Streaming FM at ${Number(s.freq_mhz).toFixed(1)} MHz | LNA ${s.lna_gain_db} dB | VGA ${s.vga_gain_db} dB`);
             setToggleUi();
-            try {
-              await ensureAudio();
-              resumePending = false;
-              audioLoop();
-            } catch (_) {
-              resumePending = true;
+            resumePending = !(await tryEnsureAudio());
+            audioLoop();
+            if (resumePending) {
+              setResumeStatus();
+            } else {
+              setStatus(`Streaming FM at ${Number(s.freq_mhz).toFixed(1)} MHz | LNA ${s.lna_gain_db} dB | VGA ${s.vga_gain_db} dB`);
             }
           } else {
+            localStorage.removeItem(RESUME_KEY);
             setStatus("Idle.");
           }
         } catch (_) {
@@ -675,12 +794,13 @@
             setStatus("Enter a valid FM frequency.");
             return;
           }
+          const stages = gainToStages(rxGainEl.value);
           const payload = {
             device_id: deviceEl.value,
             freq_mhz: freq,
             sample_rate_sps: 2000000,
-            lna_gain_db: Number(lnaGainEl.value),
-            vga_gain_db: Number(vgaGainEl.value),
+            lna_gain_db: stages.lna,
+            vga_gain_db: stages.vga,
           };
           const resp = await fetch("/api/radio/start", {
             method: "POST",
@@ -689,21 +809,22 @@
           });
           const data = await resp.json();
           if (!resp.ok) throw new Error(data.detail || data.error || "start failed");
-          const wasRunning = running;
           running = true;
-          try {
-            await ensureAudio();
-            resumePending = false;
-          } catch (_) {
-            resumePending = true;
-          }
-          if (!wasRunning) audioLoop();
+          localStorage.setItem(RESUME_KEY, "1");
+          resumePending = !(await tryEnsureAudio());
+          audioLoop();
           bufferedStarts = 0;
           addHistory(payload.freq_mhz);
-          if (data.lna_gain_db !== undefined) lnaGainEl.value = Number(data.lna_gain_db);
-          if (data.vga_gain_db !== undefined) vgaGainEl.value = Number(data.vga_gain_db);
+          if (data.lna_gain_db !== undefined && data.vga_gain_db !== undefined) {
+            rxGainEl.value = stagesToGain(data.lna_gain_db, data.vga_gain_db);
+          }
           setGainUi();
-          setStatus(`Streaming FM at ${payload.freq_mhz.toFixed(1)} MHz | LNA ${lnaGainEl.value} dB | VGA ${vgaGainEl.value} dB`);
+          const acceptedStages = gainToStages(rxGainEl.value);
+          if (resumePending) {
+            setResumeStatus();
+          } else {
+            setStatus(`Streaming FM at ${payload.freq_mhz.toFixed(1)} MHz | LNA ${acceptedStages.lna} dB | VGA ${acceptedStages.vga} dB`);
+          }
           setToggleUi();
         } catch (err) {
           setStatus(`Start failed: ${err.message}`);
@@ -712,6 +833,7 @@
 
       async function stopNow() {
         running = false;
+        localStorage.removeItem(RESUME_KEY);
         await fetch("/api/radio/stop", { method: "POST" });
         setStatus("Stopped.");
         setToggleUi();
@@ -724,13 +846,19 @@
 
       window.addEventListener("pointerdown", async () => {
         if (!resumePending || !running) return;
-        try {
-          await ensureAudio();
-          resumePending = false;
-          audioLoop();
-          setStatus(`Streaming FM at ${Number(freqEl.value).toFixed(1)} MHz`);
-        } catch (_) {}
+        await resumeAudioNow();
       }, { passive: true });
+
+      window.addEventListener("beforeunload", () => {
+        if (running) localStorage.setItem(RESUME_KEY, "1");
+      });
+
+      window.addEventListener("pageshow", () => {
+        if (localStorage.getItem(RESUME_KEY) === "1") {
+          tryEnsureAudio();
+          syncStatusOnce();
+        }
+      });
 
       freqEl.addEventListener("keydown", async (ev) => {
         if (ev.key === "Enter") {
@@ -742,6 +870,7 @@
       freqEl.addEventListener("input", syncDial);
       volumeEl.addEventListener("input", () => {
         setVolumeUi();
+        saveVolume();
         if (gainNode) gainNode.gain.value = Number(volumeEl.value);
       });
       spectrumModeBtn.addEventListener("click", () => {
@@ -754,12 +883,10 @@
         waveModeBtn.classList.add("active");
         spectrumModeBtn.classList.remove("active");
       });
-      lnaGainEl.addEventListener("input", setGainUi);
-      vgaGainEl.addEventListener("input", setGainUi);
-      lnaGainEl.addEventListener("change", applyGainIfRunning);
-      vgaGainEl.addEventListener("change", applyGainIfRunning);
+      rxGainEl.addEventListener("input", setGainUi);
+      rxGainEl.addEventListener("change", applyGainIfRunning);
       syncDial();
-      setVolumeUi();
+      loadSavedVolume();
       setGainUi();
       drawMiniSpec();
       async function initPage() {

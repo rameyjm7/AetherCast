@@ -59,6 +59,11 @@ class RadioState:
     rds_rt: str = ""
     rds_pi: str = ""
     rds_pty: str = ""
+    rds_feed_bytes: int = 0
+    rds_lines: int = 0
+    rds_json_lines: int = 0
+    rds_last_line: str = ""
+    rds_error: str = ""
 
 
 class FmDemod:
@@ -160,16 +165,22 @@ class RdsDecoder:
 
     def start(self) -> bool:
         if shutil.which("redsea") is None:
+            state.rds_error = "redsea not found"
             return False
-        self.proc = subprocess.Popen(
-            ["redsea", "-r", "171k"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=False,
-            bufsize=0,
-        )
+        try:
+            self.proc = subprocess.Popen(
+                ["redsea", "-r", "171k"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=False,
+                bufsize=0,
+            )
+        except Exception as exc:
+            state.rds_error = f"redsea start failed: {exc}"
+            return False
         self.alive = True
+        state.rds_error = ""
         self._stdout_thread = threading.Thread(target=self._read_stdout, daemon=True)
         self._stdout_thread.start()
         return True
@@ -181,10 +192,15 @@ class RdsDecoder:
             line = self.proc.stdout.readline()
             if not line:
                 break
+            state.rds_lines += 1
+            state.rds_last_line = line.decode("utf-8", errors="ignore").strip()[-300:]
             try:
-                data = json.loads(line.decode("utf-8", errors="ignore").strip())
-            except Exception:
+                data = json.loads(state.rds_last_line)
+            except Exception as exc:
+                state.rds_error = f"redsea non-json output: {exc}"
                 continue
+            state.rds_json_lines += 1
+            state.rds_error = ""
             state.rds_pi = str(data.get("pi", state.rds_pi) or state.rds_pi)
             state.rds_ps = str(data.get("ps", state.rds_ps) or state.rds_ps)
             state.rds_rt = str(data.get("radiotext", state.rds_rt) or state.rds_rt)
@@ -195,8 +211,10 @@ class RdsDecoder:
             return
         try:
             self.proc.stdin.write(pcm171k)
+            state.rds_feed_bytes += len(pcm171k)
         except Exception:
             self.alive = False
+            state.rds_error = "redsea stdin closed"
 
     def stop(self) -> None:
         self.alive = False
@@ -228,6 +246,10 @@ def _worker_loop(stream_id: str, sample_rate_sps: int) -> None:
     rds = RdsDecoder()
     state.rds_available = shutil.which("redsea") is not None
     state.rds_enabled = rds.start() if state.rds_available else False
+    state.rds_feed_bytes = 0
+    state.rds_lines = 0
+    state.rds_json_lines = 0
+    state.rds_last_line = ""
     if not state.rds_available:
         state.rds_ps = ""
         state.rds_rt = ""
@@ -514,6 +536,11 @@ def status():
             "rds_ps": state.rds_ps,
             "rds_rt": state.rds_rt,
             "rds_pty": state.rds_pty,
+            "rds_feed_bytes": state.rds_feed_bytes,
+            "rds_lines": state.rds_lines,
+            "rds_json_lines": state.rds_json_lines,
+            "rds_last_line": state.rds_last_line,
+            "rds_error": state.rds_error,
         }
     )
 
