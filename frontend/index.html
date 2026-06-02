@@ -137,6 +137,28 @@
         background: #0b1220;
         border: 1px solid rgba(209, 213, 219, 0.45);
       }
+      .chart-mode {
+        margin-top: 10px;
+        display: inline-grid;
+        grid-template-columns: 1fr 1fr;
+        padding: 3px;
+        border-radius: 10px;
+        background: rgba(17, 24, 39, 0.08);
+        border: 1px solid rgba(209, 213, 219, 0.75);
+      }
+      .chart-mode button {
+        border: 0;
+        border-radius: 8px;
+        padding: 7px 12px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 0.88rem;
+      }
+      .chart-mode button.active {
+        background: rgba(255,255,255,0.9);
+        color: var(--text);
+        box-shadow: 0 1px 5px rgba(31, 41, 55, 0.12);
+      }
       .history {
         padding: 12px;
         border-radius: 16px;
@@ -248,6 +270,10 @@
           <input id="volume" type="range" min="0" max="1.2" step="0.01" value="0.85" />
           <span id="volumeValue">85%</span>
         </div>
+        <div class="chart-mode">
+          <button id="spectrumModeBtn" class="active" type="button">Spectrum</button>
+          <button id="waveModeBtn" type="button">Waveform</button>
+        </div>
         <canvas id="miniSpec" width="800" height="72"></canvas>
       </div>
       <div class="bottom-grid">
@@ -276,6 +302,8 @@
       const vgaGainEl = document.getElementById("vgaGain");
       const lnaGainValueEl = document.getElementById("lnaGainValue");
       const vgaGainValueEl = document.getElementById("vgaGainValue");
+      const spectrumModeBtn = document.getElementById("spectrumModeBtn");
+      const waveModeBtn = document.getElementById("waveModeBtn");
       const specCanvas = document.getElementById("miniSpec");
       const specCtx = specCanvas.getContext("2d");
 
@@ -289,7 +317,11 @@
       const HISTORY_KEY = "fm_channel_history_v1";
       const MAX_HISTORY = 10;
       let channelHistory = [];
-      const specBars = new Array(64).fill(0);
+      let chartMode = "spectrum";
+      const specBars = new Array(96).fill(0);
+      const waveBars = new Array(96).fill(0);
+      const levelTrail = new Array(96).fill(0);
+      let waveLevel = 0.08;
 
       function setStatus(msg) { statusEl.textContent = msg; }
       function syncDial() {
@@ -413,15 +445,58 @@
         const h = specCanvas.height;
         specCtx.fillStyle = "#0b1220";
         specCtx.fillRect(0, 0, w, h);
+        if (chartMode === "waveform") {
+          const center = h / 2;
+          const bw = w / waveBars.length;
+          specCtx.fillStyle = "rgba(255, 69, 58, 0.12)";
+          specCtx.fillRect(0, 0, w, h);
+          for (let i = 0; i < waveBars.length; i++) {
+            const v = Math.max(0.02, Math.min(1, waveBars[i]));
+            const bh = v * (h * 0.42);
+            const x = i * bw + bw * 0.32;
+            const barW = Math.max(1, bw * (0.18 + v * 0.28));
+            const alpha = 0.25 + v * 0.62;
+            specCtx.fillStyle = i > waveBars.length - 4 ? "rgba(255, 69, 58, 0.95)" : `rgba(255, 69, 58, ${alpha})`;
+            specCtx.fillRect(x, center - bh, barW, bh * 2);
+            waveBars[i] *= 0.86;
+          }
+          specCtx.strokeStyle = "rgba(255, 184, 179, 0.76)";
+          specCtx.lineWidth = 1.5;
+          specCtx.beginPath();
+          for (let i = 0; i < levelTrail.length; i++) {
+            const x = (i / (levelTrail.length - 1)) * w;
+            const y = h - 6 - Math.min(1, levelTrail[i]) * (h * 0.24);
+            if (i === 0) specCtx.moveTo(x, y);
+            else specCtx.lineTo(x, y);
+            levelTrail[i] *= 0.94;
+          }
+          specCtx.stroke();
+          const playX = w * 0.74;
+          specCtx.strokeStyle = "rgba(255, 69, 58, 0.95)";
+          specCtx.lineWidth = 1;
+          specCtx.beginPath();
+          specCtx.moveTo(playX, 8);
+          specCtx.lineTo(playX, h - 8);
+          specCtx.stroke();
+          specCtx.fillStyle = "rgba(255, 69, 58, 0.95)";
+          specCtx.beginPath();
+          specCtx.arc(playX, 8, 2, 0, Math.PI * 2);
+          specCtx.arc(playX, h - 8, 2, 0, Math.PI * 2);
+          specCtx.fill();
+          requestAnimationFrame(drawMiniSpec);
+          return;
+        }
         const bw = w / specBars.length;
         for (let i = 0; i < specBars.length; i++) {
           const v = Math.max(0, Math.min(1, specBars[i]));
           const bh = Math.max(2, v * (h - 6));
           const x = i * bw;
           const y = h - bh - 3;
-          specCtx.fillStyle = `rgba(${40 + Math.floor(v * 120)}, ${120 + Math.floor(v * 100)}, 255, 0.95)`;
+          const hue = 0 + (235 * i) / Math.max(1, specBars.length - 1);
+          const lightness = 42 + v * 20;
+          specCtx.fillStyle = `hsla(${hue}, 92%, ${lightness}%, 0.95)`;
           specCtx.fillRect(x + 1, y, Math.max(1, bw - 2), bh);
-          specBars[i] *= 0.92;
+          specBars[i] *= 0.82;
         }
         requestAnimationFrame(drawMiniSpec);
       }
@@ -432,8 +507,33 @@
         const f32 = new Float32Array(pcm.length);
         for (let i = 0; i < pcm.length; i++) f32[i] = pcm[i] / 32768.0;
 
+        if (f32.length) {
+          const windowSize = Math.min(f32.length, 2400);
+          const start = f32.length - windowSize;
+          const step = Math.max(1, Math.floor(windowSize / waveBars.length));
+          let totalRms = 0;
+          for (let i = 0; i < waveBars.length; i++) {
+            let sum = 0;
+            let count = 0;
+            const from = start + i * step;
+            const to = Math.min(f32.length, from + step);
+            for (let j = from; j < to; j++) {
+              sum += f32[j] * f32[j];
+              count += 1;
+            }
+            const rms = Math.sqrt(sum / Math.max(1, count));
+            totalRms += rms;
+            waveLevel = Math.max(waveLevel * 0.985, rms);
+            const normalized = rms / Math.max(0.025, waveLevel * 1.7);
+            const compressed = Math.pow(Math.min(1, normalized), 0.72);
+            waveBars[i] = waveBars[i] * 0.22 + compressed * 0.78;
+          }
+          levelTrail.shift();
+          levelTrail.push(Math.pow(Math.min(1, (totalRms / waveBars.length) / Math.max(0.025, waveLevel)), 0.65));
+        }
+
         // Update mini spectrograph from a simple DFT over a short audio window.
-        const n = 256;
+        const n = 192;
         if (f32.length >= n) {
           const bins = specBars.length;
           for (let b = 0; b < bins; b++) {
@@ -446,7 +546,7 @@
               im -= f32[t] * Math.sin(ang);
             }
             const mag = Math.sqrt(re * re + im * im) / n;
-            specBars[b] = Math.max(specBars[b], Math.min(1, mag * 8));
+            specBars[b] = Math.max(specBars[b], Math.min(1, mag * 11));
           }
         }
 
@@ -643,6 +743,16 @@
       volumeEl.addEventListener("input", () => {
         setVolumeUi();
         if (gainNode) gainNode.gain.value = Number(volumeEl.value);
+      });
+      spectrumModeBtn.addEventListener("click", () => {
+        chartMode = "spectrum";
+        spectrumModeBtn.classList.add("active");
+        waveModeBtn.classList.remove("active");
+      });
+      waveModeBtn.addEventListener("click", () => {
+        chartMode = "waveform";
+        waveModeBtn.classList.add("active");
+        spectrumModeBtn.classList.remove("active");
       });
       lnaGainEl.addEventListener("input", setGainUi);
       vgaGainEl.addEventListener("input", setGainUi);
