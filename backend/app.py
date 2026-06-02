@@ -121,15 +121,23 @@ class FmDemod:
 
         # RDS path: feed multiplex-like discriminator to redsea at 171 kHz.
         step_rds = self.demod_rate / float(self.rds_rate)
-        pos_rds = np.arange(self.resample_pos_rds, demod.size - 1, step_rds, dtype=np.float32)
+        pos_rds = np.arange(self.resample_pos_rds, demod.size - 1, step_rds, dtype=np.float64)
         if pos_rds.size:
+            next_pos_rds = float(pos_rds[-1] + step_rds - (demod.size - 1))
             idx_r = np.floor(pos_rds).astype(np.int32)
-            frac_r = pos_rds - idx_r
-            rds_f = demod[idx_r] * (1.0 - frac_r) + demod[idx_r + 1] * frac_r
-            self.resample_pos_rds = float(pos_rds[-1] + step_rds - (demod.size - 1))
-            rds_peak = float(np.max(np.abs(rds_f))) if rds_f.size else 1.0
-            rds_scale = 0.9 / max(rds_peak, 0.3)
-            rds_pcm = (np.clip(rds_f * rds_scale, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
+            valid_r = idx_r + 1 < demod.size
+            idx_r = idx_r[valid_r]
+            pos_rds = pos_rds[valid_r]
+            if not pos_rds.size:
+                self.resample_pos_rds = max(0.0, next_pos_rds)
+                rds_pcm = b""
+            else:
+                frac_r = pos_rds - idx_r
+                rds_f = demod[idx_r] * (1.0 - frac_r) + demod[idx_r + 1] * frac_r
+                self.resample_pos_rds = max(0.0, next_pos_rds)
+                rds_peak = float(np.max(np.abs(rds_f))) if rds_f.size else 1.0
+                rds_scale = 0.9 / max(rds_peak, 0.3)
+                rds_pcm = (np.clip(rds_f * rds_scale, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
         else:
             self.resample_pos_rds = float(self.resample_pos_rds + demod.size)
             rds_pcm = b""
@@ -140,14 +148,21 @@ class FmDemod:
 
         # Resample to out_rate using linear interpolation with continuity.
         step = self.demod_rate / float(self.out_rate)
-        positions = np.arange(self.resample_pos, y.size - 1, step, dtype=np.float32)
+        positions = np.arange(self.resample_pos, y.size - 1, step, dtype=np.float64)
         if positions.size == 0:
             self.resample_pos = float(self.resample_pos + y.size)
             return b"", rds_pcm
+        next_pos = float(positions[-1] + step - (y.size - 1))
         idx = np.floor(positions).astype(np.int32)
+        valid = idx + 1 < y.size
+        idx = idx[valid]
+        positions = positions[valid]
+        if positions.size == 0:
+            self.resample_pos = max(0.0, next_pos)
+            return b"", rds_pcm
         frac = positions - idx
         audio_f = y[idx] * (1.0 - frac) + y[idx + 1] * frac
-        self.resample_pos = float(positions[-1] + step - (y.size - 1))
+        self.resample_pos = max(0.0, next_pos)
 
         # Normalize and convert to PCM16 mono.
         peak = float(np.max(np.abs(audio_f))) if audio_f.size else 1.0
@@ -283,7 +298,11 @@ def _worker_loop(stream_id: str, sample_rate_sps: int) -> None:
                         break
                     if not isinstance(chunk, (bytes, bytearray)):
                         continue
-                    pcm, rds_pcm = demod.process_iq_i8(bytes(chunk))
+                    try:
+                        pcm, rds_pcm = demod.process_iq_i8(bytes(chunk))
+                    except Exception as exc:
+                        state.worker_error = f"Demod error: {exc}"
+                        break
                     if not pcm:
                         continue
                     if state.rds_enabled:
