@@ -67,6 +67,8 @@ class RadioState:
     rds_stderr: str = ""
     rds_pilot_db: float = -120.0
     rds_subcarrier_db: float = -120.0
+    empty_audio_polls: int = 0
+    restarting: bool = False
 
 
 class FmDemod:
@@ -85,6 +87,8 @@ class FmDemod:
         self.rds_rate = 171000
         self.rds_pilot_db = -120.0
         self.rds_subcarrier_db = -120.0
+        self._rds_metric_buf = np.empty(0, dtype=np.float32)
+        self._rds_scale = 1.0
 
     def process_iq_i8(self, raw: bytes) -> tuple[bytes, bytes]:
         if not raw:
@@ -141,9 +145,11 @@ class FmDemod:
                 frac_r = pos_rds - idx_r
                 rds_f = demod[idx_r] * (1.0 - frac_r) + demod[idx_r + 1] * frac_r
                 self.resample_pos_rds = max(0.0, next_pos_rds)
-                rds_peak = float(np.max(np.abs(rds_f))) if rds_f.size else 1.0
-                rds_scale = 0.9 / max(rds_peak, 0.3)
-                rds_pcm = (np.clip(rds_f * rds_scale, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
+                if rds_f.size:
+                    block_peak = float(np.percentile(np.abs(rds_f), 99.0))
+                    target_scale = 0.85 / max(block_peak, 0.2)
+                    self._rds_scale = (self._rds_scale * 0.96) + (target_scale * 0.04)
+                rds_pcm = (np.clip(rds_f * self._rds_scale, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
         else:
             self.resample_pos_rds = float(self.resample_pos_rds + demod.size)
             rds_pcm = b""
@@ -178,10 +184,18 @@ class FmDemod:
         return pcm.tobytes(), rds_pcm
 
     def _update_rds_signal_metrics(self, demod: np.ndarray) -> None:
-        if demod.size < 2048:
+        if demod.size:
+            self._rds_metric_buf = np.concatenate((self._rds_metric_buf, demod.astype(np.float32, copy=False)))
+            max_metric_samples = int(max(8192, self.demod_rate * 0.35))
+            if self._rds_metric_buf.size > max_metric_samples:
+                self._rds_metric_buf = self._rds_metric_buf[-max_metric_samples:]
+
+        if self._rds_metric_buf.size < 4096:
             return
-        n = min(8192, demod.size)
-        windowed = demod[:n] * np.hanning(n).astype(np.float32)
+        n = min(32768, self._rds_metric_buf.size)
+        samples = self._rds_metric_buf[-n:]
+        samples = samples - float(np.mean(samples))
+        windowed = samples * np.hanning(n).astype(np.float32)
         spectrum = np.abs(np.fft.rfft(windowed)) ** 2
         freqs = np.fft.rfftfreq(n, d=1.0 / self.demod_rate)
         noise = float(np.median(spectrum)) + 1e-12
@@ -203,6 +217,7 @@ class RdsDecoder:
         self.alive = False
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
+        self._feed_buf = bytearray()
 
     def start(self) -> bool:
         if shutil.which("redsea") is None:
@@ -265,9 +280,14 @@ class RdsDecoder:
         if not self.alive or self.proc is None or self.proc.stdin is None or not pcm171k:
             return
         try:
-            self.proc.stdin.write(pcm171k)
+            self._feed_buf.extend(pcm171k)
+            if len(self._feed_buf) < 8192:
+                return
+            out = bytes(self._feed_buf)
+            self._feed_buf.clear()
+            self.proc.stdin.write(out)
             self.proc.stdin.flush()
-            state.rds_feed_bytes += len(pcm171k)
+            state.rds_feed_bytes += len(out)
         except Exception:
             self.alive = False
             state.rds_error = "redsea stdin closed"
@@ -295,6 +315,36 @@ def _drain_audio_queue() -> None:
             audio_q.get_nowait()
         except queue.Empty:
             break
+
+
+def _gateway_streams() -> list[dict]:
+    try:
+        resp = requests.get(f"{_gateway_base()}/streams", headers=_gateway_headers(), timeout=2)
+        if resp.status_code >= 400:
+            return []
+        streams = resp.json()
+        return streams if isinstance(streams, list) else []
+    except requests.RequestException:
+        return []
+
+
+def _stop_gateway_stream(stream_id: str) -> None:
+    if not stream_id:
+        return
+    try:
+        requests.post(f"{_gateway_base()}/streams/{stream_id}/stop", headers=_gateway_headers(), timeout=3)
+    except requests.RequestException:
+        pass
+
+
+def _stop_duplicate_gateway_streams(device_id: str | None, keep_stream_id: str | None = None) -> None:
+    if not device_id:
+        return
+    for stream in _gateway_streams():
+        stream_id = str(stream.get("stream_id", "")).strip()
+        cfg = stream.get("config", {}) or {}
+        if stream_id and stream_id != keep_stream_id and str(cfg.get("device_id", "")).strip() == device_id:
+            _stop_gateway_stream(stream_id)
 
 
 def _worker_loop(stream_id: str, sample_rate_sps: int) -> None:
@@ -401,10 +451,16 @@ def _attach_existing_stream(
     vga_gain_db: int,
 ) -> None:
     global worker_thread
-    if worker_thread and worker_thread.is_alive():
+    if worker_thread and worker_thread.is_alive() and state.stream_id == stream_id:
+        _stop_duplicate_gateway_streams(device_id, stream_id)
         return
+    if worker_thread and worker_thread.is_alive():
+        worker_stop.set()
+        worker_thread.join(timeout=1.5)
+        worker_thread = None
     worker_stop.clear()
     _drain_audio_queue()
+    _stop_duplicate_gateway_streams(device_id, stream_id)
     worker_thread = threading.Thread(target=_worker_loop, args=(stream_id, sample_rate_sps), daemon=True)
     worker_thread.start()
     state.running = True
@@ -415,19 +471,18 @@ def _attach_existing_stream(
     state.lna_gain_db = int(lna_gain_db)
     state.vga_gain_db = int(vga_gain_db)
     state.worker_error = ""
+    state.empty_audio_polls = 0
 
 
 def _try_attach_from_gateway() -> None:
-    if state.running:
-        return
     try:
-        resp = requests.get(f"{_gateway_base()}/streams", headers=_gateway_headers(), timeout=1.5)
-        if resp.status_code >= 400:
-            return
-        streams = resp.json()
+        streams = _gateway_streams()
         if not streams:
             return
-        first = streams[0]
+        if state.running and state.stream_id and any(str(s.get("stream_id", "")).strip() == state.stream_id for s in streams):
+            _stop_duplicate_gateway_streams(state.device_id, state.stream_id)
+            return
+        first = streams[-1]
         cfg = first.get("config", {}) or {}
         stream_id = str(first.get("stream_id", "")).strip()
         device_id = str(cfg.get("device_id", "")).strip()
@@ -470,6 +525,72 @@ def _stop_stream() -> None:
     state.gateway_start_response = None
     state.rds_enabled = False
     _drain_audio_queue()
+
+
+def _restart_current_stream(reason: str) -> bool:
+    global worker_thread
+    if state.restarting or not state.device_id:
+        return False
+    state.restarting = True
+    state.worker_error = f"Restarting stream: {reason}"
+    device_id = state.device_id
+    freq_mhz = state.freq_mhz
+    sample_rate_sps = state.sample_rate_sps
+    lna_gain_db = state.lna_gain_db
+    vga_gain_db = state.vga_gain_db
+    try:
+        worker_stop.set()
+        if worker_thread and worker_thread.is_alive():
+            worker_thread.join(timeout=1.5)
+        worker_thread = None
+        if state.stream_id:
+            _stop_gateway_stream(state.stream_id)
+        _stop_duplicate_gateway_streams(device_id)
+        _drain_audio_queue()
+
+        resp = requests.post(
+            f"{_gateway_base()}/streams/start",
+            headers=_gateway_headers(),
+            json={
+                "device_id": device_id,
+                "center_freq_hz": int(freq_mhz * 1e6),
+                "sample_rate_sps": sample_rate_sps,
+                "lna_gain_db": lna_gain_db,
+                "vga_gain_db": vga_gain_db,
+                "amp_enable": False,
+                "baseband_filter_hz": sample_rate_sps,
+                "duration_seconds": None,
+                "num_samples": None,
+            },
+            timeout=12,
+        )
+        if resp.status_code >= 400:
+            state.worker_error = f"Restart failed: HTTP {resp.status_code}"
+            return False
+        body = resp.json()
+        stream_id = body["stream_id"]
+        accepted_config = body.get("config", {}) or {}
+        actual_rate = int(accepted_config.get("sample_rate_sps", sample_rate_sps))
+        state.stream_id = stream_id
+        state.sample_rate_sps = actual_rate
+        state.lna_gain_db = int(accepted_config.get("lna_gain_db", lna_gain_db))
+        state.vga_gain_db = int(accepted_config.get("vga_gain_db", vga_gain_db))
+        state.gateway_start_response = body
+        state.produced_chunks = 0
+        state.served_chunks = 0
+        state.last_audio_rms = 0.0
+        state.empty_audio_polls = 0
+        worker_stop.clear()
+        worker_thread = threading.Thread(target=_worker_loop, args=(stream_id, actual_rate), daemon=True)
+        worker_thread.start()
+        state.running = True
+        state.worker_error = ""
+        return True
+    except Exception as exc:
+        state.worker_error = f"Restart failed: {exc}"
+        return False
+    finally:
+        state.restarting = False
 
 
 @app.get("/")
@@ -658,7 +779,15 @@ def audio_batch():
         state.served_chunks += 1
 
     if not chunks:
+        state.empty_audio_polls += 1
+        if (
+            state.empty_audio_polls >= 4
+            and state.running
+            and "websocket closed" in (state.worker_error or "").lower()
+        ):
+            _restart_current_stream("audio stalled after websocket close")
         return Response(b"", mimetype="application/octet-stream", status=204)
+    state.empty_audio_polls = 0
     return Response(b"".join(chunks), mimetype="application/octet-stream")
 
 

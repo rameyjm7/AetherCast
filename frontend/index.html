@@ -1033,6 +1033,8 @@
             if (s.running) {
               if (resumePending) {
                 setResumeStatus();
+              } else if (s.worker_error) {
+                setStatus(`${s.worker_error}...`);
               } else {
                 setStatus(`Streaming FM at ${Number(s.freq_mhz).toFixed(1)} MHz | LNA ${s.lna_gain_db} dB | VGA ${s.vga_gain_db} dB`);
               }
