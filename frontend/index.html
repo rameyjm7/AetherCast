@@ -390,6 +390,12 @@
         background: rgba(255, 255, 255, 0.035);
         font-size: 0.92rem;
       }
+      .rds-card.locking {
+        border-color: rgba(107, 182, 255, 0.28);
+      }
+      .rds-card.locked {
+        border-color: rgba(48, 209, 88, 0.34);
+      }
       .rds-main {
         font-weight: 650;
         color: var(--text);
@@ -409,6 +415,44 @@
         font-size: 0.76rem;
         color: var(--muted);
         overflow-wrap: anywhere;
+      }
+      .rds-meter {
+        margin-top: 9px;
+        display: grid;
+        gap: 6px;
+      }
+      .rds-meter-row {
+        display: grid;
+        grid-template-columns: 72px 1fr 48px;
+        align-items: center;
+        gap: 8px;
+        color: var(--muted);
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+      .rds-bar {
+        height: 6px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.07);
+      }
+      .rds-fill {
+        height: 100%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, var(--accent), var(--active));
+        width: 0%;
+        transition: width 160ms ease;
+      }
+      .rds-pill {
+        display: inline-flex;
+        margin-top: 8px;
+        padding: 5px 8px;
+        border-radius: 999px;
+        background: rgba(107, 182, 255, 0.1);
+        color: var(--accent);
+        font-size: 0.74rem;
+        font-weight: 650;
       }
       @media (max-width: 860px) {
         .top { grid-template-columns: 1fr; }
@@ -456,7 +500,7 @@
             </div>
             <div>
               <label for="freq">Frequency (MHz)</label>
-              <input id="freq" type="number" min="76" max="108" step="0.1" value="92.1" />
+              <input id="freq" type="number" min="87.5" max="108" step="0.1" value="92.1" />
             </div>
           </div>
           <div class="gain-grid">
@@ -483,7 +527,7 @@
         <canvas id="miniSpec" width="800" height="72"></canvas>
       </div>
       <div class="bottom-grid">
-        <div class="rds-card">
+        <div class="rds-card" id="rdsCard">
           <h3>RDS</h3>
           <div id="rds">RDS: waiting...</div>
         </div>
@@ -496,6 +540,7 @@
 
     <script>
       const statusEl = document.getElementById("status");
+      const rdsCardEl = document.getElementById("rdsCard");
       const rdsEl = document.getElementById("rds");
       const deviceEl = document.getElementById("device");
       const freqEl = document.getElementById("freq");
@@ -752,19 +797,49 @@
         }
         return { title: clean, artist: "", raw: clean };
       }
+      function signalPct(db) {
+        const value = Number(db);
+        if (!Number.isFinite(value)) return 0;
+        return Math.max(0, Math.min(100, Math.round((value / 30) * 100)));
+      }
+      function formatDb(db) {
+        const value = Number(db);
+        if (!Number.isFinite(value)) return "--";
+        return `${value.toFixed(1)} dB`;
+      }
       function renderRds(s) {
         const station = (s.rds_ps || "").trim();
         const text = parseRadioText(s.rds_rt || "");
-        const status = s.rds_available ? (s.rds_enabled ? "RDS on" : "RDS idle") : "RDS unavailable";
+        const pilotDb = Number(s.rds_pilot_db);
+        const rdsDb = Number(s.rds_subcarrier_db);
+        const hasJson = Number(s.rds_json_lines || 0) > 0;
+        const hasSignal = Number.isFinite(rdsDb) && rdsDb > 6;
+        const status = s.rds_available ? (s.rds_enabled ? (hasJson ? "RDS locked" : "RDS scanning") : "RDS idle") : "RDS unavailable";
         const feedKb = Math.round(Number(s.rds_feed_bytes || 0) / 1024);
         const lines = Number(s.rds_lines || 0);
         const jsonLines = Number(s.rds_json_lines || 0);
-        const err = s.rds_error ? ` | ${s.rds_error}` : "";
+        const err = s.rds_error || s.rds_stderr || "";
+        const last = s.rds_last_line ? `last ${s.rds_last_line}` : "";
+        rdsCardEl.classList.toggle("locked", hasJson);
+        rdsCardEl.classList.toggle("locking", !hasJson && hasSignal);
         rdsEl.innerHTML = `
           <div class="rds-main">${escapeHtml(text.title)}</div>
           ${text.artist ? `<div class="rds-sub">${escapeHtml(text.artist)}</div>` : ""}
           <div class="rds-meta">${escapeHtml(station || "No station name")} | ${escapeHtml(status)}</div>
-          <div class="rds-debug">feed ${feedKb} KB | lines ${lines} | json ${jsonLines}${escapeHtml(err)}</div>
+          <div class="rds-meter">
+            <div class="rds-meter-row">
+              <span>Pilot</span>
+              <span class="rds-bar"><span class="rds-fill" style="width: ${signalPct(pilotDb)}%"></span></span>
+              <span>${escapeHtml(formatDb(pilotDb))}</span>
+            </div>
+            <div class="rds-meter-row">
+              <span>RDS 57k</span>
+              <span class="rds-bar"><span class="rds-fill" style="width: ${signalPct(rdsDb)}%"></span></span>
+              <span>${escapeHtml(formatDb(rdsDb))}</span>
+            </div>
+          </div>
+          ${hasSignal && !hasJson ? `<span class="rds-pill">Signal present, waiting for decode lock</span>` : ""}
+          <div class="rds-debug">feed ${feedKb} KB | lines ${lines} | json ${jsonLines}${err ? ` | ${escapeHtml(err)}` : ""}${last ? ` | ${escapeHtml(last)}` : ""}</div>
         `;
       }
       async function fetchJsonWithTimeout(url, opts = {}, timeoutMs = 1800) {
@@ -1010,8 +1085,8 @@
         try {
           syncDial();
           const freq = Number(freqEl.value);
-          if (!Number.isFinite(freq) || freq < 76 || freq > 108) {
-            setStatus("Enter a valid FM frequency.");
+          if (!Number.isFinite(freq) || freq < 87.5 || freq > 108) {
+            setStatus("Enter an FM frequency between 87.5 and 108 MHz.");
             return;
           }
           const stages = gainToStages(rxGainEl.value);

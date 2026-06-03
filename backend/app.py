@@ -64,6 +64,9 @@ class RadioState:
     rds_json_lines: int = 0
     rds_last_line: str = ""
     rds_error: str = ""
+    rds_stderr: str = ""
+    rds_pilot_db: float = -120.0
+    rds_subcarrier_db: float = -120.0
 
 
 class FmDemod:
@@ -80,6 +83,8 @@ class FmDemod:
         self.resample_pos_rds = 0.0
         self._leftover = b""
         self.rds_rate = 171000
+        self.rds_pilot_db = -120.0
+        self.rds_subcarrier_db = -120.0
 
     def process_iq_i8(self, raw: bytes) -> tuple[bytes, bytes]:
         if not raw:
@@ -118,6 +123,7 @@ class FmDemod:
         demod = np.angle(z * np.conj(z_prev)).astype(np.float32)
         if demod.size < 4:
             return b"", b""
+        self._update_rds_signal_metrics(demod)
 
         # RDS path: feed multiplex-like discriminator to redsea at 171 kHz.
         step_rds = self.demod_rate / float(self.rds_rate)
@@ -171,12 +177,32 @@ class FmDemod:
         pcm = (audio * 32767.0).astype(np.int16)
         return pcm.tobytes(), rds_pcm
 
+    def _update_rds_signal_metrics(self, demod: np.ndarray) -> None:
+        if demod.size < 2048:
+            return
+        n = min(8192, demod.size)
+        windowed = demod[:n] * np.hanning(n).astype(np.float32)
+        spectrum = np.abs(np.fft.rfft(windowed)) ** 2
+        freqs = np.fft.rfftfreq(n, d=1.0 / self.demod_rate)
+        noise = float(np.median(spectrum)) + 1e-12
+
+        def band_db(center_hz: float, width_hz: float) -> float:
+            band = (freqs >= center_hz - width_hz) & (freqs <= center_hz + width_hz)
+            if not np.any(band):
+                return -120.0
+            power = float(np.mean(spectrum[band]))
+            return float(10.0 * np.log10((power + 1e-12) / noise))
+
+        self.rds_pilot_db = band_db(19000.0, 800.0)
+        self.rds_subcarrier_db = band_db(57000.0, 3500.0)
+
 
 class RdsDecoder:
     def __init__(self) -> None:
         self.proc: subprocess.Popen | None = None
         self.alive = False
         self._stdout_thread: threading.Thread | None = None
+        self._stderr_thread: threading.Thread | None = None
 
     def start(self) -> bool:
         if shutil.which("redsea") is None:
@@ -184,10 +210,10 @@ class RdsDecoder:
             return False
         try:
             self.proc = subprocess.Popen(
-                ["redsea", "-r", "171k"],
+                ["redsea", "--input", "mpx", "--samplerate", "171000", "--output", "json", "--rbds", "--show-partial"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 text=False,
                 bufsize=0,
             )
@@ -196,8 +222,11 @@ class RdsDecoder:
             return False
         self.alive = True
         state.rds_error = ""
+        state.rds_stderr = ""
         self._stdout_thread = threading.Thread(target=self._read_stdout, daemon=True)
         self._stdout_thread.start()
+        self._stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
+        self._stderr_thread.start()
         return True
 
     def _read_stdout(self) -> None:
@@ -217,15 +246,27 @@ class RdsDecoder:
             state.rds_json_lines += 1
             state.rds_error = ""
             state.rds_pi = str(data.get("pi", state.rds_pi) or state.rds_pi)
-            state.rds_ps = str(data.get("ps", state.rds_ps) or state.rds_ps)
-            state.rds_rt = str(data.get("radiotext", state.rds_rt) or state.rds_rt)
-            state.rds_pty = str(data.get("prog_type", state.rds_pty) or state.rds_pty)
+            state.rds_ps = str(data.get("ps", data.get("partial_ps", state.rds_ps)) or state.rds_ps)
+            state.rds_rt = str(
+                data.get("radiotext", data.get("partial_radiotext", state.rds_rt)) or state.rds_rt
+            )
+            state.rds_pty = str(data.get("prog_type", data.get("partial_prog_type", state.rds_pty)) or state.rds_pty)
+
+    def _read_stderr(self) -> None:
+        if self.proc is None or self.proc.stderr is None:
+            return
+        while self.alive:
+            line = self.proc.stderr.readline()
+            if not line:
+                break
+            state.rds_stderr = line.decode("utf-8", errors="ignore").strip()[-300:]
 
     def feed(self, pcm171k: bytes) -> None:
         if not self.alive or self.proc is None or self.proc.stdin is None or not pcm171k:
             return
         try:
             self.proc.stdin.write(pcm171k)
+            self.proc.stdin.flush()
             state.rds_feed_bytes += len(pcm171k)
         except Exception:
             self.alive = False
@@ -265,6 +306,9 @@ def _worker_loop(stream_id: str, sample_rate_sps: int) -> None:
     state.rds_lines = 0
     state.rds_json_lines = 0
     state.rds_last_line = ""
+    state.rds_stderr = ""
+    state.rds_pilot_db = -120.0
+    state.rds_subcarrier_db = -120.0
     if not state.rds_available:
         state.rds_ps = ""
         state.rds_rt = ""
@@ -303,10 +347,12 @@ def _worker_loop(stream_id: str, sample_rate_sps: int) -> None:
                     except Exception as exc:
                         state.worker_error = f"Demod error: {exc}"
                         break
-                    if not pcm:
-                        continue
+                    state.rds_pilot_db = demod.rds_pilot_db
+                    state.rds_subcarrier_db = demod.rds_subcarrier_db
                     if state.rds_enabled:
                         rds.feed(rds_pcm)
+                    if not pcm:
+                        continue
                     pcm_accum.extend(pcm)
                     if len(pcm_accum) < target_chunk_bytes:
                         continue
@@ -460,6 +506,8 @@ def start_radio():
 
     if not device_id:
         return jsonify({"error": "device_id is required"}), 400
+    if not 87.5 <= freq_mhz <= 108.0:
+        return jsonify({"error": "freq_mhz must be between 87.5 and 108.0"}), 400
 
     if state.running:
         _stop_stream()
@@ -560,6 +608,9 @@ def status():
             "rds_json_lines": state.rds_json_lines,
             "rds_last_line": state.rds_last_line,
             "rds_error": state.rds_error,
+            "rds_stderr": state.rds_stderr,
+            "rds_pilot_db": state.rds_pilot_db,
+            "rds_subcarrier_db": state.rds_subcarrier_db,
         }
     )
 
