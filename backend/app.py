@@ -81,6 +81,8 @@ class FmDemod:
         self.decim = max(1, int(round(self.in_rate / 240000.0)))
         self.demod_rate = self.in_rate / float(self.decim)
         self.prev = np.complex64(1.0 + 0j)
+        self.channel_filter = self._design_lowpass(num_taps=129, cutoff_hz=115000.0)
+        self._filter_tail = np.zeros(max(0, self.channel_filter.size - 1), dtype=np.complex64)
         self.resample_pos = 0.0
         self.resample_pos_rds = 0.0
         self._leftover = b""
@@ -107,14 +109,10 @@ class FmDemod:
         i = iq[0::2] / 128.0
         q = iq[1::2] / 128.0
 
-        # Fast boxcar decimation to reduce CPU load and smooth RF noise.
-        if self.decim > 1:
-            n = (i.size // self.decim) * self.decim
-            if n < self.decim:
-                return b"", b""
-            i = i[:n].reshape(-1, self.decim).mean(axis=1)
-            q = q[:n].reshape(-1, self.decim).mean(axis=1)
         z = (i + 1j * q).astype(np.complex64)
+        if z.size < 4:
+            return b"", b""
+        z = self._channel_filter_and_decimate(z)
         if z.size < 4:
             return b"", b""
 
@@ -182,6 +180,22 @@ class FmDemod:
         audio = np.clip(audio_f * scale, -1.0, 1.0)
         pcm = (audio * 32767.0).astype(np.int16)
         return pcm.tobytes(), rds_pcm
+
+    def _design_lowpass(self, num_taps: int, cutoff_hz: float) -> np.ndarray:
+        cutoff = min(cutoff_hz, (self.in_rate / 2.0) * 0.92)
+        n = np.arange(num_taps, dtype=np.float32) - ((num_taps - 1) / 2.0)
+        taps = 2.0 * cutoff / self.in_rate * np.sinc(2.0 * cutoff / self.in_rate * n)
+        taps *= np.hamming(num_taps).astype(np.float32)
+        taps /= np.sum(taps)
+        return taps.astype(np.float32)
+
+    def _channel_filter_and_decimate(self, z: np.ndarray) -> np.ndarray:
+        if self.channel_filter.size <= 1:
+            return z
+        z_ext = np.concatenate((self._filter_tail, z))
+        filtered = np.convolve(z_ext, self.channel_filter, mode="valid").astype(np.complex64)
+        self._filter_tail = z_ext[-self._filter_tail.size :].astype(np.complex64) if self._filter_tail.size else self._filter_tail
+        return filtered[:: self.decim] if self.decim > 1 else filtered
 
     def _update_rds_signal_metrics(self, demod: np.ndarray) -> None:
         if demod.size:
