@@ -1,8 +1,9 @@
 # AetherCast
 
 AetherCast turns local broadcast FM from an SDR into a browser-playable radio stream.
+<img width="905" height="613" alt="image" src="https://github.com/user-attachments/assets/609b8a14-fffc-4929-9349-0a676e393ef5" />
 
-<img width="733" height="694" alt="image" src="https://github.com/user-attachments/assets/15a8f11a-ee4e-43dc-be8c-a10b8825238e" />
+
 
 
 It is built with the same overall approach as SDR-Shark:
