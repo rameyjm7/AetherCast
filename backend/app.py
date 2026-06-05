@@ -71,24 +71,39 @@ class RadioState:
     rds_stderr: str = ""
     rds_pilot_db: float = -120.0
     rds_subcarrier_db: float = -120.0
+    stereo_enabled: bool = False
+    stereo_blend: float = 0.0
     empty_audio_polls: int = 0
     restarting: bool = False
 
 
 class FmDemod:
-    """Very simple mono narrow pipeline for broadcast FM listening."""
+    """Broadcast FM demodulator with stereo decode and mono fallback."""
 
-    def __init__(self, in_rate: int, out_rate: int = 48000):
+    def __init__(self, in_rate: int, out_rate: int = 48000, stereo_enabled: bool = False):
         self.in_rate = int(in_rate)
         self.out_rate = int(out_rate)
+        self.stereo_enabled = bool(stereo_enabled)
         # Keep discriminator stream reasonably wide, then resample to audio.
         self.decim = max(1, int(round(self.in_rate / 240000.0)))
         self.demod_rate = self.in_rate / float(self.decim)
         self.prev = np.complex64(1.0 + 0j)
         # Preserve the full broadcast FM channel, including stereo/RDS, while
         # still suppressing adjacent 200 kHz channels before FM demodulation.
-        self.channel_filter = self._design_lowpass(num_taps=257, cutoff_hz=125000.0)
+        self.channel_filter = self._design_lowpass(num_taps=257, cutoff_hz=125000.0, sample_rate=self.in_rate)
         self._filter_tail = np.zeros(max(0, self.channel_filter.size - 1), dtype=np.complex64)
+        self.mono_filter = self._design_lowpass(num_taps=129, cutoff_hz=15000.0, sample_rate=self.demod_rate)
+        self.pilot_filter = self._design_bandpass(num_taps=129, low_hz=18500.0, high_hz=19500.0, sample_rate=self.demod_rate)
+        self.stereo_filter = self._design_bandpass(num_taps=257, low_hz=23000.0, high_hz=53000.0, sample_rate=self.demod_rate)
+        self.carrier_filter = self._design_bandpass(num_taps=129, low_hz=36000.0, high_hz=40000.0, sample_rate=self.demod_rate)
+        self.diff_filter = self._design_lowpass(num_taps=129, cutoff_hz=11000.0, sample_rate=self.demod_rate)
+        self._mono_tail = np.zeros(max(0, self.mono_filter.size - 1), dtype=np.float32)
+        self._pilot_tail = np.zeros(max(0, self.pilot_filter.size - 1), dtype=np.float32)
+        self._stereo_tail = np.zeros(max(0, self.stereo_filter.size - 1), dtype=np.float32)
+        self._carrier_tail = np.zeros(max(0, self.carrier_filter.size - 1), dtype=np.float32)
+        self._diff_tail = np.zeros(max(0, self.diff_filter.size - 1), dtype=np.float32)
+        self._stereo_mono_delay = max(0, ((self.stereo_filter.size - 1) // 2 + (self.diff_filter.size - 1) // 2) - ((self.mono_filter.size - 1) // 2))
+        self._stereo_mono_delay_tail = np.zeros(self._stereo_mono_delay, dtype=np.float32)
         self.resample_pos = 0.0
         self._leftover = b""
         self.rds_rate = int(round(self.demod_rate))
@@ -96,6 +111,8 @@ class FmDemod:
         self.rds_subcarrier_db = -120.0
         self._rds_metric_buf = np.empty(0, dtype=np.float32)
         self._rds_scale = 1.0
+        self._audio_scale = 1.0
+        self.stereo_blend = 0.0
 
     def process_iq_i8(self, raw: bytes) -> tuple[bytes, bytes]:
         if not raw:
@@ -141,42 +158,98 @@ class FmDemod:
             self._rds_scale = (self._rds_scale * 0.96) + (target_scale * 0.04)
         rds_pcm = (np.clip(rds_f * self._rds_scale, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
 
-        # Light audio smoothing (moving average) for hiss control.
-        kernel = np.array([0.2, 0.2, 0.2, 0.2, 0.2], dtype=np.float32)
-        y = np.convolve(demod, kernel, mode="same")
+        mpx = demod - float(np.mean(demod))
+        if self.stereo_enabled:
+            mono = self._filter_float(mpx, self.mono_filter, "_mono_tail")
+
+            # Decode FM stereo: derive a 38 kHz carrier from the 19 kHz pilot,
+            # mix L-R down, and blend only when pilot lock looks usable.
+            pilot = self._filter_float(mpx, self.pilot_filter, "_pilot_tail")
+            carrier38 = self._filter_float(pilot * pilot, self.carrier_filter, "_carrier_tail")
+            lr_dsb = self._filter_float(mpx, self.stereo_filter, "_stereo_tail")
+            carrier_rms = float(np.sqrt(np.mean(carrier38 * carrier38))) if carrier38.size else 0.0
+            carrier = carrier38 / max(carrier_rms, 1e-6)
+            lr_mixed = lr_dsb * carrier * 2.0 if carrier_rms > 1e-6 else np.zeros_like(lr_dsb)
+            lr = self._filter_float(lr_mixed.astype(np.float32, copy=False), self.diff_filter, "_diff_tail")
+            pilot_quality = max(0.0, min(1.0, (self.rds_pilot_db - 12.0) / 12.0))
+            target_blend = pilot_quality if carrier_rms > 1e-5 else 0.0
+            self.stereo_blend = (self.stereo_blend * 0.985) + (target_blend * 0.015)
+            mono = self._delay_float(mono, "_stereo_mono_delay_tail")
+            lr *= self.stereo_blend * 0.42
+
+            left = mono + lr
+            right = mono - lr
+        else:
+            # Use the older, forgiving mono path by default. It is much harder
+            # to upset on marginal RF, while still emitting two-channel frames.
+            kernel = np.array([0.2, 0.2, 0.2, 0.2, 0.2], dtype=np.float32)
+            mono = np.convolve(demod, kernel, mode="same").astype(np.float32)
+            self.stereo_blend = 0.0
+            left = mono
+            right = mono
 
         # Resample to out_rate using linear interpolation with continuity.
         step = self.demod_rate / float(self.out_rate)
-        positions = np.arange(self.resample_pos, y.size - 1, step, dtype=np.float64)
+        positions = np.arange(self.resample_pos, left.size - 1, step, dtype=np.float64)
         if positions.size == 0:
-            self.resample_pos = float(self.resample_pos + y.size)
+            self.resample_pos = float(self.resample_pos + left.size)
             return b"", rds_pcm
-        next_pos = float(positions[-1] + step - (y.size - 1))
+        next_pos = float(positions[-1] + step - (left.size - 1))
         idx = np.floor(positions).astype(np.int32)
-        valid = idx + 1 < y.size
+        valid = idx + 1 < left.size
         idx = idx[valid]
         positions = positions[valid]
         if positions.size == 0:
             self.resample_pos = max(0.0, next_pos)
             return b"", rds_pcm
         frac = positions - idx
-        audio_f = y[idx] * (1.0 - frac) + y[idx + 1] * frac
+        audio_l = left[idx] * (1.0 - frac) + left[idx + 1] * frac
+        audio_r = right[idx] * (1.0 - frac) + right[idx + 1] * frac
         self.resample_pos = max(0.0, next_pos)
 
-        # Normalize and convert to PCM16 mono.
-        peak = float(np.max(np.abs(audio_f))) if audio_f.size else 1.0
-        scale = 0.85 / max(peak, 0.2)
-        audio = np.clip(audio_f * scale, -1.0, 1.0)
-        pcm = (audio * 32767.0).astype(np.int16)
+        # Normalize and convert to interleaved PCM16 stereo.
+        peak = float(max(np.max(np.abs(audio_l)), np.max(np.abs(audio_r)))) if audio_l.size else 1.0
+        target_scale = 0.85 / max(peak, 0.2)
+        self._audio_scale = (self._audio_scale * 0.9) + (target_scale * 0.1)
+        audio_l = np.clip(audio_l * self._audio_scale, -1.0, 1.0)
+        audio_r = np.clip(audio_r * self._audio_scale, -1.0, 1.0)
+        pcm = np.empty(audio_l.size * 2, dtype=np.int16)
+        pcm[0::2] = (audio_l * 32767.0).astype(np.int16)
+        pcm[1::2] = (audio_r * 32767.0).astype(np.int16)
         return pcm.tobytes(), rds_pcm
 
-    def _design_lowpass(self, num_taps: int, cutoff_hz: float) -> np.ndarray:
-        cutoff = min(cutoff_hz, (self.in_rate / 2.0) * 0.92)
+    def _design_lowpass(self, num_taps: int, cutoff_hz: float, sample_rate: float) -> np.ndarray:
+        cutoff = min(cutoff_hz, (sample_rate / 2.0) * 0.92)
         n = np.arange(num_taps, dtype=np.float32) - ((num_taps - 1) / 2.0)
-        taps = 2.0 * cutoff / self.in_rate * np.sinc(2.0 * cutoff / self.in_rate * n)
+        taps = 2.0 * cutoff / sample_rate * np.sinc(2.0 * cutoff / sample_rate * n)
         taps *= np.hamming(num_taps).astype(np.float32)
         taps /= np.sum(taps)
         return taps.astype(np.float32)
+
+    def _design_bandpass(self, num_taps: int, low_hz: float, high_hz: float, sample_rate: float) -> np.ndarray:
+        high = min(high_hz, (sample_rate / 2.0) * 0.92)
+        low = max(10.0, min(low_hz, high * 0.9))
+        taps = self._design_lowpass(num_taps, high, sample_rate) - self._design_lowpass(num_taps, low, sample_rate)
+        taps -= np.mean(taps)
+        return taps.astype(np.float32)
+
+    def _filter_float(self, x: np.ndarray, taps: np.ndarray, tail_name: str) -> np.ndarray:
+        if taps.size <= 1:
+            return x.astype(np.float32, copy=False)
+        tail = getattr(self, tail_name)
+        x = x.astype(np.float32, copy=False)
+        x_ext = np.concatenate((tail, x))
+        filtered = np.convolve(x_ext, taps, mode="valid").astype(np.float32)
+        setattr(self, tail_name, x_ext[-tail.size :].astype(np.float32) if tail.size else tail)
+        return filtered
+
+    def _delay_float(self, x: np.ndarray, tail_name: str) -> np.ndarray:
+        tail = getattr(self, tail_name)
+        if tail.size == 0:
+            return x
+        x_ext = np.concatenate((tail, x.astype(np.float32, copy=False)))
+        setattr(self, tail_name, x_ext[-tail.size :].astype(np.float32))
+        return x_ext[: x.size].astype(np.float32, copy=False)
 
     def _channel_filter_and_decimate(self, z: np.ndarray) -> np.ndarray:
         if self.channel_filter.size <= 1:
@@ -380,11 +453,22 @@ def _stop_duplicate_gateway_streams(device_id: str | None, keep_stream_id: str |
             _stop_gateway_stream(stream_id)
 
 
-def _worker_loop(stream_id: str, sample_rate_sps: int) -> None:
-    demod = FmDemod(sample_rate_sps)
+def _clear_rds_text() -> None:
+    state.rds_ps = ""
+    state.rds_rt = ""
+    state.rds_rt_partial = False
+    state.rds_rt_ab = ""
+    state.rds_rt_seen_at = 0.0
+    state.rds_pi = ""
+    state.rds_pty = ""
+
+
+def _worker_loop(stream_id: str, sample_rate_sps: int, stereo_enabled: bool) -> None:
+    demod = FmDemod(sample_rate_sps, stereo_enabled=stereo_enabled)
     rds = RdsDecoder(demod.rds_rate)
     state.rds_available = shutil.which("redsea") is not None
     state.rds_enabled = rds.start() if state.rds_available else False
+    _clear_rds_text()
     state.rds_feed_bytes = 0
     state.rds_lines = 0
     state.rds_json_lines = 0
@@ -392,11 +476,8 @@ def _worker_loop(stream_id: str, sample_rate_sps: int) -> None:
     state.rds_stderr = ""
     state.rds_pilot_db = -120.0
     state.rds_subcarrier_db = -120.0
-    if not state.rds_available:
-        state.rds_ps = ""
-        state.rds_rt = ""
-        state.rds_pi = ""
-        state.rds_pty = ""
+    state.stereo_enabled = bool(stereo_enabled)
+    state.stereo_blend = 0.0
     pcm_accum = bytearray()
     target_chunk_bytes = 32768
     state.worker_alive = True
@@ -432,6 +513,7 @@ def _worker_loop(stream_id: str, sample_rate_sps: int) -> None:
                         break
                     state.rds_pilot_db = demod.rds_pilot_db
                     state.rds_subcarrier_db = demod.rds_subcarrier_db
+                    state.stereo_blend = demod.stereo_blend
                     if state.rds_enabled:
                         rds.feed(rds_pcm)
                     if not pcm:
@@ -482,9 +564,11 @@ def _attach_existing_stream(
     sample_rate_sps: int,
     lna_gain_db: int,
     vga_gain_db: int,
+    stereo_enabled: bool | None = None,
 ) -> None:
     global worker_thread
-    if worker_thread and worker_thread.is_alive() and state.stream_id == stream_id:
+    use_stereo = state.stereo_enabled if stereo_enabled is None else bool(stereo_enabled)
+    if worker_thread and worker_thread.is_alive() and state.stream_id == stream_id and state.stereo_enabled == use_stereo:
         _stop_duplicate_gateway_streams(device_id, stream_id)
         return
     if worker_thread and worker_thread.is_alive():
@@ -494,7 +578,7 @@ def _attach_existing_stream(
     worker_stop.clear()
     _drain_audio_queue()
     _stop_duplicate_gateway_streams(device_id, stream_id)
-    worker_thread = threading.Thread(target=_worker_loop, args=(stream_id, sample_rate_sps), daemon=True)
+    worker_thread = threading.Thread(target=_worker_loop, args=(stream_id, sample_rate_sps, use_stereo), daemon=True)
     worker_thread.start()
     state.running = True
     state.stream_id = stream_id
@@ -503,6 +587,7 @@ def _attach_existing_stream(
     state.sample_rate_sps = int(sample_rate_sps)
     state.lna_gain_db = int(lna_gain_db)
     state.vga_gain_db = int(vga_gain_db)
+    state.stereo_enabled = use_stereo
     state.worker_error = ""
     state.empty_audio_polls = 0
 
@@ -557,6 +642,10 @@ def _stop_stream() -> None:
     state.worker_error = ""
     state.gateway_start_response = None
     state.rds_enabled = False
+    state.rds_pilot_db = -120.0
+    state.rds_subcarrier_db = -120.0
+    state.stereo_blend = 0.0
+    _clear_rds_text()
     _drain_audio_queue()
 
 
@@ -571,6 +660,7 @@ def _restart_current_stream(reason: str) -> bool:
     sample_rate_sps = state.sample_rate_sps
     lna_gain_db = state.lna_gain_db
     vga_gain_db = state.vga_gain_db
+    stereo_enabled = state.stereo_enabled
     try:
         worker_stop.set()
         if worker_thread and worker_thread.is_alive():
@@ -614,7 +704,7 @@ def _restart_current_stream(reason: str) -> bool:
         state.last_audio_rms = 0.0
         state.empty_audio_polls = 0
         worker_stop.clear()
-        worker_thread = threading.Thread(target=_worker_loop, args=(stream_id, actual_rate), daemon=True)
+        worker_thread = threading.Thread(target=_worker_loop, args=(stream_id, actual_rate, stereo_enabled), daemon=True)
         worker_thread.start()
         state.running = True
         state.worker_error = ""
@@ -628,7 +718,9 @@ def _restart_current_stream(reason: str) -> bool:
 
 @app.get("/")
 def index():
-    return send_from_directory(app.static_folder, "index.html")
+    resp = send_from_directory(app.static_folder, "index.html", max_age=0)
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    return resp
 
 
 @app.get("/api/devices")
@@ -657,6 +749,7 @@ def start_radio():
     sample_rate_sps = int(payload.get("sample_rate_sps", 2000000))
     lna_gain_db = int(payload.get("lna_gain_db", 32))
     vga_gain_db = int(payload.get("vga_gain_db", 40))
+    stereo_enabled = bool(payload.get("stereo_enabled", False))
 
     if not device_id:
         return jsonify({"error": "device_id is required"}), 400
@@ -703,7 +796,7 @@ def start_radio():
     worker_stop.clear()
     _drain_audio_queue()
 
-    worker_thread = threading.Thread(target=_worker_loop, args=(stream_id, actual_rate), daemon=True)
+    worker_thread = threading.Thread(target=_worker_loop, args=(stream_id, actual_rate, stereo_enabled), daemon=True)
     worker_thread.start()
 
     state.running = True
@@ -713,6 +806,7 @@ def start_radio():
     state.sample_rate_sps = actual_rate
     state.lna_gain_db = actual_lna
     state.vga_gain_db = actual_vga
+    state.stereo_enabled = stereo_enabled
     state.worker_error = ""
     state.gateway_start_response = body
 
@@ -723,6 +817,7 @@ def start_radio():
             "sample_rate_sps": actual_rate,
             "lna_gain_db": actual_lna,
             "vga_gain_db": actual_vga,
+            "stereo_enabled": stereo_enabled,
         }
     )
 
@@ -749,6 +844,8 @@ def status():
             "produced_chunks": state.produced_chunks,
             "served_chunks": state.served_chunks,
             "last_audio_rms": state.last_audio_rms,
+            "audio_channels": 2,
+            "stereo_enabled": state.stereo_enabled,
             "worker_error": state.worker_error,
             "gateway_start_response": state.gateway_start_response,
             "rds_available": state.rds_available,
@@ -767,12 +864,16 @@ def status():
             "rds_stderr": state.rds_stderr,
             "rds_pilot_db": state.rds_pilot_db,
             "rds_subcarrier_db": state.rds_subcarrier_db,
+            "stereo_blend": state.stereo_blend,
         }
     )
 
 
 @app.post("/api/radio/attach-existing")
 def attach_existing():
+    payload = request.get_json(silent=True) or {}
+    if "stereo_enabled" in payload:
+        state.stereo_enabled = bool(payload.get("stereo_enabled"))
     _try_attach_from_gateway()
     return jsonify({"ok": True, "running": state.running, "stream_id": state.stream_id})
 
