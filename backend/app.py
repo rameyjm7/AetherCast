@@ -4,6 +4,7 @@ import json
 import shutil
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -57,6 +58,9 @@ class RadioState:
     rds_enabled: bool = False
     rds_ps: str = ""
     rds_rt: str = ""
+    rds_rt_partial: bool = False
+    rds_rt_ab: str = ""
+    rds_rt_seen_at: float = 0.0
     rds_pi: str = ""
     rds_pty: str = ""
     rds_feed_bytes: int = 0
@@ -81,12 +85,13 @@ class FmDemod:
         self.decim = max(1, int(round(self.in_rate / 240000.0)))
         self.demod_rate = self.in_rate / float(self.decim)
         self.prev = np.complex64(1.0 + 0j)
-        self.channel_filter = self._design_lowpass(num_taps=129, cutoff_hz=115000.0)
+        # Preserve the full broadcast FM channel, including stereo/RDS, while
+        # still suppressing adjacent 200 kHz channels before FM demodulation.
+        self.channel_filter = self._design_lowpass(num_taps=257, cutoff_hz=125000.0)
         self._filter_tail = np.zeros(max(0, self.channel_filter.size - 1), dtype=np.complex64)
         self.resample_pos = 0.0
-        self.resample_pos_rds = 0.0
         self._leftover = b""
-        self.rds_rate = 171000
+        self.rds_rate = int(round(self.demod_rate))
         self.rds_pilot_db = -120.0
         self.rds_subcarrier_db = -120.0
         self._rds_metric_buf = np.empty(0, dtype=np.float32)
@@ -127,30 +132,14 @@ class FmDemod:
             return b"", b""
         self._update_rds_signal_metrics(demod)
 
-        # RDS path: feed multiplex-like discriminator to redsea at 171 kHz.
-        step_rds = self.demod_rate / float(self.rds_rate)
-        pos_rds = np.arange(self.resample_pos_rds, demod.size - 1, step_rds, dtype=np.float64)
-        if pos_rds.size:
-            next_pos_rds = float(pos_rds[-1] + step_rds - (demod.size - 1))
-            idx_r = np.floor(pos_rds).astype(np.int32)
-            valid_r = idx_r + 1 < demod.size
-            idx_r = idx_r[valid_r]
-            pos_rds = pos_rds[valid_r]
-            if not pos_rds.size:
-                self.resample_pos_rds = max(0.0, next_pos_rds)
-                rds_pcm = b""
-            else:
-                frac_r = pos_rds - idx_r
-                rds_f = demod[idx_r] * (1.0 - frac_r) + demod[idx_r + 1] * frac_r
-                self.resample_pos_rds = max(0.0, next_pos_rds)
-                if rds_f.size:
-                    block_peak = float(np.percentile(np.abs(rds_f), 99.0))
-                    target_scale = 0.85 / max(block_peak, 0.2)
-                    self._rds_scale = (self._rds_scale * 0.96) + (target_scale * 0.04)
-                rds_pcm = (np.clip(rds_f * self._rds_scale, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
-        else:
-            self.resample_pos_rds = float(self.resample_pos_rds + demod.size)
-            rds_pcm = b""
+        # Feed redsea the discriminator MPX at the native demod rate. Redsea's
+        # own resampler is better than our simple linear resampler for RDS lock.
+        rds_f = demod - float(np.mean(demod))
+        if rds_f.size:
+            block_peak = float(np.percentile(np.abs(rds_f), 99.0))
+            target_scale = 0.85 / max(block_peak, 0.2)
+            self._rds_scale = (self._rds_scale * 0.96) + (target_scale * 0.04)
+        rds_pcm = (np.clip(rds_f * self._rds_scale, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
 
         # Light audio smoothing (moving average) for hiss control.
         kernel = np.array([0.2, 0.2, 0.2, 0.2, 0.2], dtype=np.float32)
@@ -226,7 +215,8 @@ class FmDemod:
 
 
 class RdsDecoder:
-    def __init__(self) -> None:
+    def __init__(self, sample_rate: int) -> None:
+        self.sample_rate = int(sample_rate)
         self.proc: subprocess.Popen | None = None
         self.alive = False
         self._stdout_thread: threading.Thread | None = None
@@ -239,7 +229,17 @@ class RdsDecoder:
             return False
         try:
             self.proc = subprocess.Popen(
-                ["redsea", "--input", "mpx", "--samplerate", "171000", "--output", "json", "--rbds", "--show-partial"],
+                [
+                    "redsea",
+                    "--input",
+                    "mpx",
+                    "--samplerate",
+                    str(self.sample_rate),
+                    "--output",
+                    "json",
+                    "--rbds",
+                    "--show-partial",
+                ],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -276,9 +276,28 @@ class RdsDecoder:
             state.rds_error = ""
             state.rds_pi = str(data.get("pi", state.rds_pi) or state.rds_pi)
             state.rds_ps = str(data.get("ps", data.get("partial_ps", state.rds_ps)) or state.rds_ps)
-            state.rds_rt = str(
-                data.get("radiotext", data.get("partial_radiotext", state.rds_rt)) or state.rds_rt
-            )
+            rt_ab = str(data.get("rt_ab", state.rds_rt_ab) or state.rds_rt_ab)
+            if rt_ab and rt_ab != state.rds_rt_ab:
+                state.rds_rt = ""
+                state.rds_rt_partial = False
+                state.rds_rt_ab = rt_ab
+            radiotext = str(data.get("radiotext", "") or "").strip()
+            partial_rt = str(data.get("partial_radiotext", "") or "").strip()
+            if radiotext:
+                state.rds_rt = radiotext
+                state.rds_rt_partial = False
+                state.rds_rt_seen_at = time.monotonic()
+            elif partial_rt:
+                now = time.monotonic()
+                current = state.rds_rt.strip()
+                useful = len(partial_rt) >= 8 or " - " in partial_rt or not current
+                stale = now - state.rds_rt_seen_at > 6.0
+                not_tiny_regression = len(partial_rt) >= max(8, int(len(current) * 0.45))
+                structured_text = " - " in partial_rt
+                if useful and (state.rds_rt_partial or not current or stale) and (not_tiny_regression or stale or structured_text):
+                    state.rds_rt = partial_rt
+                    state.rds_rt_partial = True
+                    state.rds_rt_seen_at = now
             state.rds_pty = str(data.get("prog_type", data.get("partial_prog_type", state.rds_pty)) or state.rds_pty)
 
     def _read_stderr(self) -> None:
@@ -363,7 +382,7 @@ def _stop_duplicate_gateway_streams(device_id: str | None, keep_stream_id: str |
 
 def _worker_loop(stream_id: str, sample_rate_sps: int) -> None:
     demod = FmDemod(sample_rate_sps)
-    rds = RdsDecoder()
+    rds = RdsDecoder(demod.rds_rate)
     state.rds_available = shutil.which("redsea") is not None
     state.rds_enabled = rds.start() if state.rds_available else False
     state.rds_feed_bytes = 0
@@ -737,6 +756,8 @@ def status():
             "rds_pi": state.rds_pi,
             "rds_ps": state.rds_ps,
             "rds_rt": state.rds_rt,
+            "rds_rt_partial": state.rds_rt_partial,
+            "rds_rt_ab": state.rds_rt_ab,
             "rds_pty": state.rds_pty,
             "rds_feed_bytes": state.rds_feed_bytes,
             "rds_lines": state.rds_lines,
@@ -807,5 +828,5 @@ def audio_batch():
 
 if __name__ == "__main__":
     host = os.getenv("FM_RADIO_HOST", "0.0.0.0")
-    port = int(os.getenv("FM_RADIO_PORT", "5050"))
+    port = int(os.getenv("FM_RADIO_PORT", "80"))
     app.run(host=host, port=port, threaded=True)
