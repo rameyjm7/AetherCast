@@ -1,35 +1,43 @@
 # AetherCast
 
-AetherCast turns local broadcast FM from an SDR into a browser-playable radio stream.
-<img width="920" height="606" alt="image" src="https://github.com/user-attachments/assets/7ec138e5-15c3-4351-be91-34bee981b784" />
+AetherCast turns local broadcast FM into a polished, browser-playable radio experience using an SDR and `sdr-gateway`.
 
+<img width="920" height="606" alt="AetherCast screenshot" src="https://github.com/user-attachments/assets/7ec138e5-15c3-4351-be91-34bee981b784" />
 
+It follows the same overall model as SDR-Shark:
 
-
-It is built with the same overall approach as SDR-Shark:
-
-- SDR IQ is sourced from `sdr-gateway`
-- Backend handles SDR control + FM demodulation
-- Frontend is a simple tuner + audio player UI
+- `sdr-gateway` provides SDR control and IQ streaming
+- the backend handles FM demodulation and audio delivery
+- the frontend provides a lightweight tuner, playback controls, and live metadata
 
 ## Features
 
-- Lists SDR devices from `sdr-gateway`
-- Starts/stops a gateway IQ stream
-- Demodulates FM (phase discriminator + de-emphasis)
-- Streams PCM audio chunks to browser for playback
-- Shows basic RDS diagnostics when `redsea` is installed
+- Browser-playable FM radio sourced from a local SDR
+- Device discovery through `sdr-gateway`
+- Start, stop, and retune without leaving the page
+- Live frequency display with recent-station history
+- Optional stereo decode with a simplified default UI
+- RDS station and song metadata when `redsea` is installed
+- Real-time spectrum view
 
-## Project Layout
+## Architecture
 
-- `backend/app.py`: Flask API + FM demod worker
-- `frontend/index.html`: simple web UI
+- `backend/app.py`
+  Flask API, gateway control, FM demodulation worker, audio chunk streaming, and RDS integration
+- `frontend/index.html`
+  Single-page UI for tuning, playback, spectrum display, and metadata presentation
 
 ## Requirements
 
-- Running `sdr-gateway` instance (`http://127.0.0.1:8080` default)
 - Python 3.10+
-- One SDR device visible in `sdr-gateway /devices`
+- A running `sdr-gateway` instance
+- At least one SDR device visible from `sdr-gateway /devices`
+
+Default gateway URL:
+
+```text
+http://127.0.0.1:8080
+```
 
 ## Setup
 
@@ -40,13 +48,13 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-If `sdr-gateway` auth is enabled:
+If gateway auth is enabled:
 
 ```bash
 export SDR_GATEWAY_API_TOKEN="<your-token>"
 ```
 
-Optional base URL override:
+If your gateway is not running on the default address:
 
 ```bash
 export SDR_GATEWAY_BASE_URL="http://127.0.0.1:8080"
@@ -60,14 +68,27 @@ source .venv/bin/activate
 python3 backend/app.py
 ```
 
-Open:
+Then open:
 
-- `http://127.0.0.1:5050`
+```text
+http://127.0.0.1:5050
+```
 
-Tune frequency (MHz), select device, press play.
+Select a device, tune a station, and press play.
+
+## Optional RDS Support
+
+For richer station and song metadata, install `redsea` and make sure it is available on your `PATH`.
+
+When RDS is available, AetherCast can display:
+
+- station name
+- song title
+- artist
+- lock state in the top status bar
 
 ## Notes
 
-- Default receive sample rate is `2000000` sps for better FM demodulation stability.
-- Audio is mono FM and intentionally minimal for a first usable baseline.
-- If playback is choppy, reduce system load or switch to a lower-latency SDR backend/device.
+- AetherCast currently uses a `2000000` sps receive rate by default for stable FM demodulation.
+- The UI is intentionally simple by default, with extra controls hidden behind `Advanced`.
+- If playback becomes choppy, check system load, SDR bandwidth stability, and gateway health first.
